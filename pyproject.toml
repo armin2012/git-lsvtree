@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "git-lsvtree-ui"
+version = "0.1.0"
+description = "Interactive single-file version tree browser for Git, ClearCase-style UI"
+requires-python = ">=3.11"
+dependencies = [
+    "PySide6>=6.6",
+]
+
+[project.scripts]
+git-lsvtree-ui = "git_lsvtree_ui.__main__:main"
