@@ -53,6 +53,7 @@ class MainWindow(QMainWindow):
 
         self.graph_view = GraphView()
         self.graph_view.scene().nodeClickedWithModifiers.connect(self._on_node_clicked_with_modifiers)
+        self.graph_view.scene().edgeClicked.connect(self._on_edge_clicked)
         self.graph_view.scene().runDoubleClicked.connect(self.expand_run)
 
         self.empty_label = QLabel("Open a file to begin (Ctrl+O)")
@@ -241,6 +242,7 @@ class MainWindow(QMainWindow):
                 file_path=file_path,
                 mode=mode,
                 collapse_enabled=self.collapse_enabled,
+                include_repo_tags=True,
                 expanded_runs=self.expanded_runs,
             )
         )
@@ -379,6 +381,14 @@ class MainWindow(QMainWindow):
                 self.detail_panel.setPlainText(f"Node: {node.id}\nbranch: {node.branch}")
         self.graph_view.scene().set_selection(self.selected_versions)
         self._update_selection_actions()
+
+    def _on_edge_clicked(self, src_id: str, dst_id: str) -> None:
+        logger.debug("main window edge clicked src=%s dst=%s", src_id, dst_id)
+        self.selected_versions = []
+        self.current_run = None
+        self.graph_view.scene().set_selection([])
+        self._update_selection_actions()
+        self.status_bar.showMessage(f"Edge selected: {src_id[:12]} -> {dst_id[:12]}")
 
     def _on_diff_loaded(self, result: DiffResult) -> None:
         logger.debug("diff loaded old=%s new=%s", result.old_hash[:12], result.new_hash[:12])

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import Signal
-from PySide6.QtGui import QTransform
-from PySide6.QtWidgets import QGraphicsScene
+from PySide6.QtCore import QRectF, Signal
+from PySide6.QtGui import QBrush, QColor, QPen, QTransform
+from PySide6.QtWidgets import QGraphicsRectItem, QGraphicsScene, QGraphicsSimpleTextItem
 
 from git_lsvtree_ui.layout.tree_layout import LayoutGraph
 
@@ -18,24 +18,40 @@ _LOD_LABEL_THRESHOLD = 0.35
 
 class GraphScene(QGraphicsScene):
     nodeClickedWithModifiers = Signal(str, object)
+    edgeClicked = Signal(str, str)
     runDoubleClicked = Signal(str)
 
     def __init__(self):
         super().__init__()
         logger.debug("init graph scene")
         self.item_by_id: dict[str, VersionNodeItem | CollapsedRunItem] = {}
+        self.edge_by_id: dict[str, EdgeItem] = {}
+        self._layout: LayoutGraph | None = None
         self._highlighted_id: str | None = None
         self._selected_ids: list[str] = []
+        self._selected_edge_id: str | None = None
+        self._edge_info_item: QGraphicsRectItem | None = None
 
     def mousePressEvent(self, event):  # noqa: N802
         item = self.itemAt(event.scenePos(), self.views()[0].transform() if self.views() else QTransform())
         # Walk up to parent if child item (e.g. label_item) was hit
-        while item and item.data(0) not in ("version_node", "run_node", None):
+        while item and item.data(0) not in ("version_node", "run_node", "edge", None):
             item = item.parentItem()
+        if item and item.data(0) == "edge":
+            src_id = item.data(1)
+            dst_id = item.data(2)
+            logger.debug("scene edge clicked src=%s dst=%s", src_id, dst_id)
+            self.set_edge_selection(src_id, dst_id)
+            self.edgeClicked.emit(src_id, dst_id)
+            event.accept()
+            return
         if item and item.data(0) in ("version_node", "run_node"):
             node_id = item.data(1)
             logger.debug("scene node clicked node_id=%s kind=%s", node_id, item.data(0))
+            self.clear_edge_selection()
             self.nodeClickedWithModifiers.emit(node_id, event.modifiers())
+        elif item is None:
+            self.clear_edge_selection()
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event):  # noqa: N802
@@ -56,15 +72,21 @@ class GraphScene(QGraphicsScene):
             len(layout.branch_headers),
         )
         self.clear()
+        self._layout = layout
         self.item_by_id = {}
+        self.edge_by_id = {}
         self._highlighted_id = None
         self._selected_ids = []
+        self._selected_edge_id = None
+        self._edge_info_item = None
 
         for header in layout.branch_headers.values():
             self.addItem(BranchHeaderItem(header))
 
         for edge in layout.edges:
-            self.addItem(EdgeItem(edge))
+            item = EdgeItem(edge)
+            self.addItem(item)
+            self.edge_by_id[item.edge_id] = item
 
         for node in layout.nodes.values():
             item = CollapsedRunItem(node) if node.kind == "run" else VersionNodeItem(node)
@@ -94,6 +116,57 @@ class GraphScene(QGraphicsScene):
             item.set_highlighted(True)
             for view in self.views():
                 view.ensureVisible(item)
+
+    def set_edge_selection(self, src_id: str, dst_id: str) -> None:
+        edge_id = f"{src_id}->{dst_id}"
+        logger.debug("set edge selection old=%s new=%s", self._selected_edge_id, edge_id)
+        self.clear_edge_selection()
+        item = self.edge_by_id.get(edge_id)
+        if not item or not self._layout:
+            logger.debug("edge selection skipped missing edge=%s", edge_id)
+            return
+        item.set_selected_state(True)
+        self._selected_edge_id = edge_id
+        self._edge_info_item = self._make_edge_info_item(src_id, dst_id, item)
+        self.addItem(self._edge_info_item)
+
+    def clear_edge_selection(self) -> None:
+        logger.debug("clear edge selection current=%s", self._selected_edge_id)
+        if self._selected_edge_id and self._selected_edge_id in self.edge_by_id:
+            self.edge_by_id[self._selected_edge_id].set_selected_state(False)
+        self._selected_edge_id = None
+        if self._edge_info_item is not None:
+            self.removeItem(self._edge_info_item)
+            self._edge_info_item = None
+
+    def _make_edge_info_item(self, src_id: str, dst_id: str, edge_item: EdgeItem) -> QGraphicsRectItem:
+        if not self._layout:
+            return QGraphicsRectItem()
+        src = self._layout.nodes[src_id]
+        dst = self._layout.nodes[dst_id]
+        text = "\n".join((
+            "edge endpoints",
+            f"from: {self._format_node_summary(src)}",
+            f"to:   {self._format_node_summary(dst)}",
+        ))
+        text_item = QGraphicsSimpleTextItem(text)
+        bounds = text_item.boundingRect()
+        pad = 6.0
+        panel = QGraphicsRectItem(QRectF(0, 0, bounds.width() + pad * 2, bounds.height() + pad * 2))
+        panel.setBrush(QBrush(QColor("#fffbeb")))
+        panel.setPen(QPen(QColor("#f59e0b"), 1.2))
+        panel.setZValue(10.0)
+        text_item.setParentItem(panel)
+        text_item.setBrush(QBrush(QColor("#111827")))
+        text_item.setPos(pad, pad)
+        anchor = edge_item.sceneBoundingRect().center()
+        panel.setPos(anchor.x() + 10, anchor.y() + 10)
+        return panel
+
+    @staticmethod
+    def _format_node_summary(node) -> str:
+        tags = f" tags={','.join(node.tags)}" if node.tags else ""
+        return f"{node.label} {node.id[:12]} branch={node.branch}{tags}"
 
     def update_lod(self, zoom: float) -> None:
         show = zoom >= _LOD_LABEL_THRESHOLD

@@ -1,8 +1,8 @@
 # git-lsvtree-ui Design Document
 
-**Version:** 1.3  
+**Version:** 1.4  
 **Date:** 2026-06-20  
-**Status:** Implemented (Phase 1–6 complete; Phase 7 merge-aware layout in design)
+**Status:** Implemented (Phase 1–7 complete; v1.4 fixes important tag visibility and adds edge selection)
 
 ---
 
@@ -22,6 +22,7 @@ The static SVG approach is suitable for archiving and overall layout inspection,
 6. Preserve existing full / key / collapse semantics, with the interactive UI as the primary interface.
 7. Visual style aligned with ClearCase Version Tree Browser: branch column headers (blue rectangles), version nodes (blue circles), main edges (dark lines), merge edges (red dashed lines).
 8. Status bar showing file, mode, version count, branch count, zoom, warnings.
+9. Click any rendered edge to highlight that edge and show both endpoint versions inside the version tree area; selecting another edge replaces the previous edge info.
 
 ### Out of scope (v1)
 
@@ -136,6 +137,11 @@ git log [--all] --topo-order --full-history --simplify-merges --parents \
 ```
 
 Invisible separator characters (`\x01`, `\x02`) prevent subject text from breaking field parsing. Full commit message is not loaded up front; it is fetched on demand via `git show -s --format=%B <hash>` when the user clicks a node.
+
+Tag loading has two paths:
+
+1. Decorations from the primary `git log` output are always parsed. These tags are attached to commits that directly appear in the file history.
+2. Repo-wide tag annotation is opt-in at the core layer through `HistoryLoader(..., include_repo_tags=True)`. The application enables this for normal UI loads so release tags that land on merge/release commits are projected to the nearest file-history anchor commit. This keeps the lower-level loader cheap by default while preserving important tag visibility in the GUI.
 
 ### 3.3 GraphModel
 
@@ -544,8 +550,10 @@ Changes confined to `layout/tree_layout.py` and its tests:
 `GraphScene` (subclass of `QGraphicsScene`) owns the item dictionary `item_by_id: dict[str, VersionNodeItem | CollapsedRunItem]` and provides:
 
 - **Hit-testing**: `mousePressEvent` calls `itemAt()` and walks up to the parent item if a child (e.g. label text) was hit. Emits `nodeClickedWithModifiers(node_id, modifiers)`.
+- **Edge hit-testing**: if a rendered `EdgeItem` is clicked, emits `edgeClicked(src_id, dst_id)` and updates scene-local edge selection state.
 - **Double-click**: `mouseDoubleClickEvent` emits `runDoubleClicked(run_id)` for collapsed run items.
 - **Selection**: `set_selection(node_ids)` applies yellow highlight (thick amber border) to selected version nodes.
+- **Edge selection**: `set_edge_selection(src_id, dst_id)` highlights exactly one edge and displays a small overlay in the version tree area with both endpoint labels, branches, short hashes, and tags. Selecting another edge removes the previous overlay and highlight.
 - **Search highlight**: `highlight_node(node_id)` applies an amber fill and scrolls the view to the node.
 - **Level-of-detail**: `update_lod(zoom)` hides all node labels when `zoom < 0.35`, reducing visual clutter at low magnification.
 
@@ -562,7 +570,7 @@ Zoom is anchored under the mouse cursor (`AnchorUnderMouse`). After `fitInView()
 | `VersionNodeItem` | `QGraphicsEllipseItem` | Blue circle; yellow thick border when selected |
 | `CollapsedRunItem` | `QGraphicsRectItem` | Light grey rectangle, dashed border |
 | `BranchHeaderItem` | `QGraphicsRectItem` | Blue rectangle at column top |
-| `EdgeItem` | `QGraphicsLineItem` | Dark grey (main/branch), red dashed (merge) |
+| `EdgeItem` | `QGraphicsPathItem` | Dark grey (main), blue (branch), red dashed (merge); bright selected pen when edge-selected |
 
 All items store a `label_item: QGraphicsSimpleTextItem` child for LOD visibility toggling.
 
@@ -721,6 +729,20 @@ TwoSelected(v1, v2)
 
 Diff action is only enabled when exactly 2 concrete version nodes are selected. Collapsed run nodes do not participate in diff selection.
 
+### 8.1b Edge selection
+
+```
+NoEdgeSelected
+  left-click edge e1      →  EdgeSelected(e1)
+
+EdgeSelected(e1)
+  left-click edge e2      →  EdgeSelected(e2)       # replaces highlight and endpoint info
+  left-click version node →  NoEdgeSelected         # node selection owns the visible focus
+  left-click blank        →  NoEdgeSelected
+```
+
+Edge selection clears version-node diff selection so the canvas has one visible focus mode at a time. Edge endpoint information is displayed in the version tree area rather than the right-side detail dock, because it explains the clicked line directly in the graph context.
+
 ### 8.2 Collapse / expand
 
 ```
@@ -780,6 +802,10 @@ Replace static column assignment with dynamic interval packing (see §5.3):
 - **Edge arrowheads**: `EdgeItem` rewritten as `QGraphicsPathItem`; draws filled triangle arrowhead (9 × 5 px) at destination. Merge: red dashed 2 px; cross-branch: blue 1.8 px; same-branch: dark-gray 1.8 px.
 - **Side-by-side diff**: `DiffPanel` rewritten as `QWidget`; left pane = old version (changed lines red `#fee2e2`), right pane = new version (changed lines blue `#dbeafe`), unchanged lines white; vertical + horizontal scroll sync.
 - **Diff overview ruler**: `DiffOverviewRuler(QWidget)` — narrow strip (scrollbar-width) to the right of the splitter; red rectangles mark diff block positions proportional to total line count; bird's-eye view of the entire file.
+
+### Phase 8 — Tag visibility and edge selection polish
+- **Important tag visibility**: normal UI loads set `include_repo_tags=True`; core tests keep the default opt-in behavior.
+- **Edge selection**: `GraphScene` tracks a single selected edge; `EdgeItem` supports selected styling; the scene displays endpoint version information as an overlay inside the version tree canvas.
 
 ---
 

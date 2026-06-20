@@ -75,6 +75,28 @@ class LayoutGraph:
         object.__setattr__(self, "branch_headers", MappingProxyType(dict(self.branch_headers)))
 
 
+@dataclass(frozen=True)
+class LayoutMetrics:
+    branch_count: int
+    max_column: int
+    canvas_width: float
+    merge_edge_count: int
+    merge_crossing_count: int
+    total_merge_span: int
+    max_merge_span: int
+    parent_constraint_violations: int
+    interval_packing_violations: int
+
+
+@dataclass(frozen=True)
+class _ColumnLayout:
+    row_by_node: dict[str, int]
+    row_ranges: dict[str, tuple[int, int]]
+    parent_map: dict[str, str]
+    merge_edges: list[tuple[str, str, int, int]]
+    branch_col: dict[str, int]
+
+
 class TreeLayout:
     def __init__(self, settings: LayoutSettings | None = None):
         self.settings = settings or LayoutSettings()
@@ -90,30 +112,10 @@ class TreeLayout:
             len(display_graph.nodes),
             len(display_graph.edges),
         )
-        row_by_node = self._row_by_node(display_graph)
-
-        # Dynamic column assignment via branch interval packing
-        main_branch = self._infer_main_branch(display_graph, branch_order)
-        all_branches = list(dict.fromkeys(
-            [main_branch] + [n.branch for n in display_graph.nodes.values()]
-        ))
-        row_ranges = self._row_ranges(display_graph, row_by_node)
-        parent_map = self._parent_branch_map(display_graph)
-        merge_edges = self._merge_branch_edges(display_graph, row_by_node)
-        branch_col = self._pack_columns(
-            all_branches,
-            row_ranges,
-            parent_map,
-            main_branch,
-            merge_edges=merge_edges,
-        )
-        if merge_edges:
-            branch_col = self._swap_optimize_columns(
-                branch_col,
-                row_ranges,
-                parent_map,
-                merge_edges,
-            )
+        column_layout = self._assign_branch_columns(display_graph, branch_order)
+        row_by_node = column_layout.row_by_node
+        row_ranges = column_layout.row_ranges
+        branch_col = column_layout.branch_col
 
         nodes: dict[str, LayoutNode] = {}
         for node_id, node in display_graph.nodes.items():
@@ -197,7 +199,90 @@ class TreeLayout:
         )
         return LayoutGraph(nodes=nodes, edges=tuple(edges), branch_headers=headers, bounds=bounds)
 
+    def layout_metrics(
+        self,
+        display_graph: DisplayGraph,
+        branch_order: tuple[str, ...] | None = None,
+    ) -> LayoutMetrics:
+        logger.info(
+            "computing layout metrics nodes=%d edges=%d",
+            len(display_graph.nodes),
+            len(display_graph.edges),
+        )
+        column_layout = self._assign_branch_columns(display_graph, branch_order)
+        branch_col = column_layout.branch_col
+        merge_edges = column_layout.merge_edges
+        max_column = max(branch_col.values(), default=0)
+        merge_spans = [
+            abs(branch_col[src_branch] - branch_col[dst_branch])
+            for src_branch, dst_branch, _, _ in merge_edges
+            if src_branch in branch_col and dst_branch in branch_col
+        ]
+        metrics = LayoutMetrics(
+            branch_count=len(branch_col),
+            max_column=max_column,
+            canvas_width=(max_column + 1) * self.settings.branch_col_width if branch_col else 0,
+            merge_edge_count=len(merge_edges),
+            merge_crossing_count=self._crossing_count(merge_edges, branch_col),
+            total_merge_span=sum(merge_spans),
+            max_merge_span=max(merge_spans, default=0),
+            parent_constraint_violations=self._parent_constraint_violation_count(
+                branch_col,
+                column_layout.parent_map,
+            ),
+            interval_packing_violations=self._interval_packing_violation_count(
+                branch_col,
+                column_layout.row_ranges,
+            ),
+        )
+        logger.info("layout metrics computed metrics=%s", metrics)
+        return metrics
+
     # ── column packing ─────────────────────────────────────────────────────
+
+    def _assign_branch_columns(
+        self,
+        display_graph: DisplayGraph,
+        branch_order: tuple[str, ...] | None,
+    ) -> _ColumnLayout:
+        row_by_node = self._row_by_node(display_graph)
+        if not display_graph.nodes:
+            logger.debug("assign branch columns empty graph")
+            return _ColumnLayout(
+                row_by_node=row_by_node,
+                row_ranges={},
+                parent_map={},
+                merge_edges=[],
+                branch_col={},
+            )
+        main_branch = self._infer_main_branch(display_graph, branch_order)
+        all_branches = list(dict.fromkeys(
+            [main_branch] + [n.branch for n in display_graph.nodes.values()]
+        ))
+        row_ranges = self._row_ranges(display_graph, row_by_node)
+        parent_map = self._parent_branch_map(display_graph)
+        merge_edges = self._merge_branch_edges(display_graph, row_by_node)
+        branch_col = self._pack_columns(
+            all_branches,
+            row_ranges,
+            parent_map,
+            main_branch,
+            merge_edges=merge_edges,
+        )
+        if merge_edges:
+            branch_col = self._swap_optimize_columns(
+                branch_col,
+                row_ranges,
+                parent_map,
+                merge_edges,
+            )
+        return _ColumnLayout(
+            row_by_node=row_by_node,
+            row_ranges=row_ranges,
+            parent_map=parent_map,
+            merge_edges=merge_edges,
+            branch_col=branch_col,
+        )
 
     def _infer_main_branch(
         self,
@@ -523,6 +608,14 @@ class TreeLayout:
         col: dict[str, int],
         parent_map: dict[str, str],
     ) -> bool:
+        return self._parent_constraint_violation_count(col, parent_map) == 0
+
+    def _parent_constraint_violation_count(
+        self,
+        col: dict[str, int],
+        parent_map: dict[str, str],
+    ) -> int:
+        violations = 0
         for child, parent in parent_map.items():
             if child not in col or parent not in col:
                 continue
@@ -534,14 +627,22 @@ class TreeLayout:
                     col[child],
                     col[parent],
                 )
-                return False
-        return True
+                violations += 1
+        return violations
 
     def _columns_satisfy_interval_packing(
         self,
         col: dict[str, int],
         row_ranges: dict[str, tuple[int, int]],
     ) -> bool:
+        return self._interval_packing_violation_count(col, row_ranges) == 0
+
+    def _interval_packing_violation_count(
+        self,
+        col: dict[str, int],
+        row_ranges: dict[str, tuple[int, int]],
+    ) -> int:
+        violations = 0
         by_col: dict[int, list[tuple[str, tuple[int, int]]]] = {}
         for branch, column in col.items():
             if branch not in row_ranges:
@@ -557,9 +658,9 @@ class TreeLayout:
                         rng,
                         other_rng,
                     )
-                    return False
+                    violations += 1
             by_col.setdefault(column, []).append((branch, rng))
-        return True
+        return violations
 
     @staticmethod
     def _row_ranges_overlap_with_gap(

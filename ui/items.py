@@ -4,7 +4,7 @@ import logging
 import math
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QBrush, QColor, QPainterPath, QPen, QPolygonF
+from PySide6.QtGui import QBrush, QColor, QPainterPath, QPainterPathStroker, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QGraphicsEllipseItem, QGraphicsPathItem, QGraphicsRectItem, QGraphicsSimpleTextItem,
 )
@@ -127,9 +127,13 @@ class EdgeItem(QGraphicsPathItem):
     def __init__(self, edge: LayoutEdge):
         logger.debug("create edge item src=%s dst=%s kind=%s", edge.src, edge.dst, edge.kind)
         super().__init__()
+        self.edge_id = f"{edge.src}->{edge.dst}"
         self.setData(0, "edge")
-        self.setData(1, f"{edge.src}->{edge.dst}")
+        self.setData(1, edge.src)
+        self.setData(2, edge.dst)
+        self.setData(3, edge.kind)
         self.setToolTip(edge.label or edge.kind)
+        self._selected_state = False
 
         if edge.kind == "merge":
             color = QColor("#dc2626")
@@ -146,6 +150,7 @@ class EdgeItem(QGraphicsPathItem):
             line_width = 1.8
             dash = False
             self.setZValue(-1.0)  # furthest behind
+        self._base_z = self.zValue()
 
         sx, sy = edge.start.x, edge.start.y
         ex, ey = edge.end.x, edge.end.y
@@ -175,5 +180,26 @@ class EdgeItem(QGraphicsPathItem):
         pen = QPen(color, line_width)
         if dash:
             pen.setStyle(Qt.PenStyle.DashLine)
+        self._base_pen = QPen(pen)
+        self._selected_pen = QPen(QColor("#f59e0b"), line_width + 2.5)
+        self._base_brush = QBrush(color)
+        self._selected_brush = QBrush(QColor("#f59e0b"))
         self.setPen(pen)
-        self.setBrush(QBrush(color))
+        self.setBrush(self._base_brush)
+
+    def set_selected_state(self, on: bool) -> None:
+        logger.debug("set edge selected edge=%s selected=%s", self.edge_id, on)
+        self._selected_state = on
+        if on:
+            self.setPen(self._selected_pen)
+            self.setBrush(self._selected_brush)
+            self.setZValue(max(self.zValue(), 2.0))
+        else:
+            self.setPen(self._base_pen)
+            self.setBrush(self._base_brush)
+            self.setZValue(self._base_z)
+
+    def shape(self):  # noqa: D102
+        stroker = QPainterPathStroker()
+        stroker.setWidth(max(10.0, self.pen().widthF() + 6.0))
+        return stroker.createStroke(self.path()).united(self.path())

@@ -216,6 +216,12 @@ def test_columns_satisfy_parent_constraints_rejects_child_not_right_of_parent():
     assert not TreeLayout(S)._columns_satisfy_parent_constraints(col, pm)
 
 
+def test_parent_constraint_violation_count_counts_all_violations():
+    col = {"main": 0, "feature": 0, "nested": 1}
+    pm = {"feature": "main", "nested": "feature"}
+    assert TreeLayout(S)._parent_constraint_violation_count(col, pm) == 1
+
+
 def test_columns_satisfy_interval_packing_accepts_non_overlapping_same_column():
     col = {"feature-a": 1, "feature-b": 1}
     rng = {"feature-a": (2, 4), "feature-b": (7, 9)}
@@ -226,6 +232,12 @@ def test_columns_satisfy_interval_packing_rejects_overlap_with_gap():
     col = {"feature-a": 1, "feature-b": 1}
     rng = {"feature-a": (2, 4), "feature-b": (5, 9)}
     assert not TreeLayout(S)._columns_satisfy_interval_packing(col, rng)
+
+
+def test_interval_packing_violation_count_counts_overlaps():
+    col = {"A": 1, "B": 1, "C": 1}
+    rng = {"A": (0, 5), "B": (3, 7), "C": (10, 12)}
+    assert TreeLayout(S)._interval_packing_violation_count(col, rng) == 1
 
 
 def test_pack_columns_output_satisfies_constraints():
@@ -371,6 +383,45 @@ def test_layout_invokes_swap_optimizer_for_merge_edges(monkeypatch):
 
     assert len(calls) == 1
     assert calls[0][3] == [("A", "main", 0, 1)]
+
+
+def test_layout_metrics_reports_width_crossings_and_merge_span():
+    dg = make_display_graph(
+        [
+            ("m0", "main", 0, ()),
+            ("m1", "main", 5, ()),
+            ("a0", "A", 1, ()),
+            ("a1", "A", 2, ()),
+        ],
+        [
+            ("m0", "a0", "branch"),
+            ("a1", "m1", "merge"),
+        ],
+    )
+
+    metrics = TreeLayout(S).layout_metrics(dg, branch_order=("main", "A"))
+
+    assert metrics.branch_count == 2
+    assert metrics.max_column == 1
+    assert metrics.canvas_width == S.branch_col_width * 2
+    assert metrics.merge_edge_count == 1
+    assert metrics.merge_crossing_count == 0
+    assert metrics.total_merge_span == 1
+    assert metrics.max_merge_span == 1
+    assert metrics.parent_constraint_violations == 0
+    assert metrics.interval_packing_violations == 0
+
+
+def test_layout_metrics_empty_graph_is_zeroed():
+    dg = make_display_graph([], [])
+
+    metrics = TreeLayout(S).layout_metrics(dg)
+
+    assert metrics.branch_count == 0
+    assert metrics.max_column == 0
+    assert metrics.canvas_width == 0
+    assert metrics.merge_edge_count == 0
+    assert metrics.merge_crossing_count == 0
 
 
 # ── layout: coordinates ────────────────────────────────────────────────────
