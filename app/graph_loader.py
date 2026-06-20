@@ -65,7 +65,7 @@ class GraphLoaderWorker(QRunnable):
         try:
             repo = GitRepo.from_file(self.request.file_path)
             graph = HistoryLoader(repo, include_all=self.request.include_all).load()
-            graph = BranchRebuilder().rebuild(graph)
+            graph = BranchRebuilder().rebuild(graph, main_branch=repo.current_branch())
             key_result = KeySelector().select(
                 graph,
                 mode=self.request.mode,

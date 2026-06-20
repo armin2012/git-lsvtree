@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import logging
+import math
 
-from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QBrush, QColor, QPen
-from PySide6.QtWidgets import QGraphicsEllipseItem, QGraphicsLineItem, QGraphicsRectItem, QGraphicsSimpleTextItem
+from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtGui import QBrush, QColor, QPainterPath, QPen, QPolygonF
+from PySide6.QtWidgets import QGraphicsEllipseItem, QGraphicsPathItem, QGraphicsRectItem, QGraphicsSimpleTextItem
 
 from git_lsvtree_ui.layout.tree_layout import BranchHeader, LayoutEdge, LayoutNode
 
@@ -95,16 +96,58 @@ class BranchHeaderItem(QGraphicsRectItem):
         self.label_item.setPos(rect.x + 4, rect.y + 1)
 
 
-class EdgeItem(QGraphicsLineItem):
+class EdgeItem(QGraphicsPathItem):
+    _ARROW_LEN: float = 9.0
+    _ARROW_W: float = 5.0
+
     def __init__(self, edge: LayoutEdge):
         logger.debug("create edge item src=%s dst=%s kind=%s", edge.src, edge.dst, edge.kind)
-        super().__init__(edge.start.x, edge.start.y, edge.end.x, edge.end.y)
+        super().__init__()
         self.setData(0, "edge")
         self.setData(1, f"{edge.src}->{edge.dst}")
-        color = QColor("#dc2626") if edge.kind == "merge" else QColor("#374151")
-        pen = QPen(color, 1.4)
-        if edge.kind == "merge":
-            pen.setStyle(Qt.PenStyle.DashLine)
-        self.setPen(pen)
         self.setZValue(-1)
         self.setToolTip(edge.label or edge.kind)
+
+        if edge.kind == "merge":
+            color = QColor("#dc2626")
+            line_width = 2.0
+            dash = True
+        elif edge.kind == "branch":
+            color = QColor("#1d4ed8")
+            line_width = 1.8
+            dash = False
+        else:
+            color = QColor("#374151")
+            line_width = 1.8
+            dash = False
+
+        sx, sy = edge.start.x, edge.start.y
+        ex, ey = edge.end.x, edge.end.y
+        dx, dy = ex - sx, ey - sy
+        length = math.hypot(dx, dy)
+
+        path = QPainterPath()
+        if length < 1.0:
+            path.moveTo(sx, sy)
+            path.lineTo(ex, ey)
+        else:
+            ux, uy = dx / length, dy / length
+            bx = ex - self._ARROW_LEN * ux
+            by = ey - self._ARROW_LEN * uy
+            path.moveTo(sx, sy)
+            path.lineTo(bx, by)
+            px, py = -uy, ux
+            arrow = QPolygonF([
+                QPointF(ex, ey),
+                QPointF(bx + self._ARROW_W * px, by + self._ARROW_W * py),
+                QPointF(bx - self._ARROW_W * px, by - self._ARROW_W * py),
+            ])
+            path.addPolygon(arrow)
+            path.closeSubpath()
+
+        self.setPath(path)
+        pen = QPen(color, line_width)
+        if dash:
+            pen.setStyle(Qt.PenStyle.DashLine)
+        self.setPen(pen)
+        self.setBrush(QBrush(color))

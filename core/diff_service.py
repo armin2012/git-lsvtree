@@ -15,6 +15,8 @@ class DiffResult:
     new_hash: str
     rel_path: str
     text: str
+    old_content: str = ""
+    new_content: str = ""
 
 
 class DiffService:
@@ -29,16 +31,19 @@ class DiffService:
             old_hash[:12],
             new_hash[:12],
         )
+        old_content = self.repo.git_checked("show", f"{old_hash}:{self.repo.rel_path}")
+        new_content = self.repo.git_checked("show", f"{new_hash}:{self.repo.rel_path}")
         text = self.repo.git_checked(
             "diff",
             f"{old_hash}:{self.repo.rel_path}",
             f"{new_hash}:{self.repo.rel_path}",
         )
         logger.debug(
-            "diff complete rel_path=%s old=%s new=%s bytes=%d",
+            "diff complete rel_path=%s old=%s new=%s old_bytes=%d new_bytes=%d",
             self.repo.rel_path,
             old_hash[:12],
             new_hash[:12],
-            len(text),
+            len(old_content),
+            len(new_content),
         )
-        return DiffResult(old_hash, new_hash, self.repo.rel_path, text)
+        return DiffResult(old_hash, new_hash, self.repo.rel_path, text, old_content, new_content)

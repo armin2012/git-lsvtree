@@ -68,6 +68,13 @@ class GitRepo:
             capture_output=True,
         )
 
+    def current_branch(self) -> str:
+        result = self.git("rev-parse", "--abbrev-ref", "HEAD")
+        name = result.stdout.strip()
+        if result.returncode != 0 or name in ("HEAD", ""):
+            return "main"
+        return name
+
     def git_checked(self, *args: str) -> str:
         result = self.git(*args)
         if result.returncode != 0:
