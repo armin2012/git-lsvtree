@@ -1,8 +1,8 @@
 # git-lsvtree-ui Design Document
 
-**Version:** 1.0  
+**Version:** 1.1  
 **Date:** 2026-06-20  
-**Status:** Implemented (Phase 1–4 complete)
+**Status:** Implemented (Phase 1–4 complete; Phase 5 diff UX in progress)
 
 ---
 
@@ -58,7 +58,7 @@ core/
   branch_rebuilder.py  Reconstructs branch names from first-parent topology
   key_selector.py    Selects structural skeleton + tag + sampled nodes (Key mode)
   collapse_model.py  Folds linear chains → DisplayGraph with run nodes
-  diff_service.py    Runs `git diff old:file new:file` → DiffResult
+  diff_service.py    Fetches full file content + unified diff → DiffResult
 
 layout/
   geometry.py        Point, Rect value types (frozen dataclasses)
@@ -71,7 +71,7 @@ ui/
   graph_scene.py     QGraphicsScene: hit-testing, selection state, LOD, highlight
   graph_view.py      QGraphicsView: zoom, middle-button pan, wheel scroll
   detail_panel.py    QTextEdit: commit metadata on node click
-  diff_panel.py      QPlainTextEdit (monospace): unified diff output
+  diff_panel.py      QWidget: side-by-side diff view with overview ruler
   status_bar.py      QStatusBar: file info, mode, zoom, warnings
 
 app/
@@ -222,12 +222,25 @@ Collapsible nodes within the same branch are grouped into runs. Each run becomes
 ### 3.7 DiffService
 
 ```python
+@dataclass(frozen=True)
+class DiffResult:
+    old_hash: str
+    new_hash: str
+    rel_path: str
+    text: str          # unified diff text (kept for reference)
+    old_content: str   # full file content at old_hash via git show
+    new_content: str   # full file content at new_hash via git show
+
 class DiffService:
     def diff(self, old_hash: str, new_hash: str) -> DiffResult:
-        # runs: git diff old_hash:rel_path new_hash:rel_path
+        # git show old_hash:rel_path  →  old_content
+        # git show new_hash:rel_path  →  new_content
+        # git diff old_hash:rel_path new_hash:rel_path  →  text
 ```
 
-The caller is responsible for ordering `old_hash` / `new_hash` by `topo_rank` (lower = older) before calling `diff()`. The `MainWindow.run_diff()` method performs this sort automatically.
+`old_content` and `new_content` provide the full file text that the `DiffPanel` uses for side-by-side alignment. The `text` (unified diff) is retained as a fallback and for logging.
+
+The caller is responsible for ordering `old_hash` / `new_hash` by `topo_rank` (lower = older) before calling `diff()`. `MainWindow.run_diff()` performs this sort automatically.
 
 ---
 
@@ -346,6 +359,83 @@ Runs `DiffService.diff()` in a `QRunnable`. Emits `DiffLoaderSignals.loaded(Diff
 
 ---
 
+## 7a. DiffPanel Design
+
+### Layout
+
+```
+┌─────────────────────────────────────────────────────┬──┐
+│  Old  aabbccdd1234  —  src/foo.py                   │  │
+│  New  eeff55667788  —  src/foo.py                   │  │
+├──────────────────────────┬──────────────────────────┤  │
+│ Left pane (old version)  │ Right pane (new version) │  │
+│                          │                          │  │
+│  line 1 (white)          │  line 1 (white)          │█ │ ← overview ruler
+│  line 2 [red bg]         │  line 2 [blue bg]        │  │
+│  line 3 (white)          │  line 3 (white)          │  │
+│  (empty)                 │  line 4 [blue bg]        │  │
+│  ...                     │  ...                     │  │
+│                          │                          │  │
+├──────────────────────────┴──────────────────────────┤  │
+│ [scrollbar]                                [scroll] │  │
+└─────────────────────────────────────────────────────┴──┘
+```
+
+### Components
+
+| Widget | Class | Role |
+|--------|-------|------|
+| Root | `DiffPanel(QWidget)` | Top-level container |
+| Header row | `QLabel` × 2 | Show old/new hash + rel_path |
+| Content area | `QSplitter(Horizontal)` | Resize left/right panes |
+| Left pane | `QPlainTextEdit` | Old file content, read-only |
+| Right pane | `QPlainTextEdit` | New file content, read-only |
+| Overview ruler | `DiffOverviewRuler(QWidget)` | Narrow strip, same width as scrollbar |
+
+### Color scheme
+
+| Content | Left pane | Right pane |
+|---------|-----------|------------|
+| Changed line | `#fee2e2` (red) | `#dbeafe` (blue) |
+| Unchanged line | `#ffffff` (white) | `#ffffff` (white) |
+| Empty padding line | no background | no background |
+
+### Line alignment algorithm
+
+Uses `difflib.SequenceMatcher(autojunk=False)` on `old_content.splitlines()` vs `new_content.splitlines()`.
+
+For each opcode block:
+
+| Opcode | Left side | Right side |
+|--------|-----------|------------|
+| `equal` | line, white | line, white |
+| `replace` | old lines red; pad with empty if shorter | new lines blue; pad with empty if shorter |
+| `delete` | old lines red | empty lines, no color |
+| `insert` | empty lines, no color | new lines blue |
+
+Padding ensures left and right always have the same total line count, which is required for synchronized scrolling to be meaningful.
+
+### Synchronized scrolling
+
+Both panes connect their `verticalScrollBar().valueChanged` and `horizontalScrollBar().valueChanged` signals to a shared handler guarded by a `_syncing: bool` flag to prevent infinite feedback loops.
+
+Mouse-wheel events are handled by Qt at the viewport level; since both scroll bars are connected, wheel scrolling on either pane drives both simultaneously.
+
+### Overview ruler (`DiffOverviewRuler`)
+
+A narrow `QWidget` (fixed width = scrollbar width, typically 12–15 px) placed to the right of the splitter.
+
+**Rendering** (`paintEvent`):
+1. Fill background `#f8fafc`.
+2. For each diff block (position in `_diff_ranges: list[tuple[int, int]]`, in lines), map the line range `[start, end)` to vertical pixel range `[y1, y2]` proportional to the total line count and ruler height. Draw a filled `#ef4444` rectangle across the full width.
+3. The ruler does **not** scroll — it always shows the entire document. Its red marks are fixed relative to the document, giving a bird's-eye view.
+
+**Data source**: `DiffPanel` computes `_diff_ranges` (list of `(first_diff_line, last_diff_line)` tuples) when populating the panes and passes them to `DiffOverviewRuler.set_ranges(total_lines, ranges)`.
+
+**Viewport indicator** (optional, Phase 6): a translucent rectangle overlaid on the ruler showing the currently visible viewport range.
+
+---
+
 ## 8. Interaction State Machines
 
 ### 8.1 Version selection
@@ -415,6 +505,12 @@ Two-version selection, DiffPanel, collapsed run display (`CollapsedRunItem`), si
 - **Export PNG**: `QPixmap` + `QPainter` render of `QGraphicsScene`.
 - **Level-of-detail**: labels hidden at zoom < 35% (`GraphScene.update_lod()`).
 
+### Phase 5 — Diff UX & Edge Arrows
+- **Branch name resolution**: `GitRepo.current_branch()` via `git rev-parse --abbrev-ref HEAD`; passed to `BranchRebuilder` so `master`/`develop` repos are labeled correctly.
+- **Edge arrowheads**: `EdgeItem` rewritten as `QGraphicsPathItem`; draws filled triangle arrowhead (9 × 5 px) at destination. Merge: red dashed 2 px; cross-branch: blue 1.8 px; same-branch: dark-gray 1.8 px.
+- **Side-by-side diff**: `DiffPanel` rewritten as `QWidget`; left pane = old version (changed lines red `#fee2e2`), right pane = new version (changed lines blue `#dbeafe`), unchanged lines white; vertical + horizontal scroll sync.
+- **Diff overview ruler**: `DiffOverviewRuler(QWidget)` — narrow strip (scrollbar-width) to the right of the splitter; red rectangles mark diff block positions proportional to total line count; bird's-eye view of the entire file.
+
 ---
 
 ## 10. Error Handling
@@ -433,9 +529,14 @@ Non-fatal situations (partial key selection, very large graphs) produce a warnin
 | Toolbar with actions | `MainWindow._create_toolbar()` — 13 actions |
 | Click node → version details | `GraphScene` → `nodeClickedWithModifiers` → `DetailPanel.show_version()` |
 | Select 2 versions → diff | `selected_versions` state + `DiffLoaderWorker` + `DiffPanel.show_diff()` |
+| Side-by-side diff view | `DiffPanel` (`QSplitter` + 2× `QPlainTextEdit`); red/blue/white color scheme |
+| Diff overview ruler | `DiffOverviewRuler.set_ranges()` → proportional red blocks in narrow right strip |
+| Scroll sync in diff | `verticalScrollBar` + `horizontalScrollBar` cross-connected with `_syncing` guard |
 | Collapse / expand runs | `CollapseModel` + `CollapsedRunItem` + `expand_run()` / `collapse_current_run()` |
 | Zoom / pan | `GraphView` wheel zoom + middle-button pan + `fit_to_view()` |
 | ClearCase visual style | Blue `BranchHeaderItem`, blue circle `VersionNodeItem`, red dashed merge `EdgeItem` |
+| Edge arrowheads | `EdgeItem` (`QGraphicsPathItem`) — filled triangle at destination, color per edge kind |
+| Branch name resolution | `GitRepo.current_branch()` → `BranchRebuilder(main_branch=...)` |
 | Status bar | `GitLsvtreeStatusBar.set_loaded()` — file, mode, counts, zoom, warning |
 | Search / locate | Toolbar search box → `GraphScene.highlight_node()` |
 | Export | `MainWindow.export_png()` → `QPixmap` |
