@@ -159,13 +159,17 @@ class MainWindow(QMainWindow):
 
     def _create_docks(self) -> None:
         logger.debug("creating dock widgets")
+        _no_float = QDockWidget.DockWidgetFeature.DockWidgetClosable | QDockWidget.DockWidgetFeature.DockWidgetMovable
+
         detail_dock = QDockWidget("Details", self)
         detail_dock.setObjectName("detailDock")
+        detail_dock.setFeatures(_no_float)
         detail_dock.setWidget(self.detail_panel)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, detail_dock)
 
         diff_dock = QDockWidget("Diff", self)
         diff_dock.setObjectName("diffDock")
+        diff_dock.setFeatures(_no_float)
         diff_dock.setWidget(self.diff_panel)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, diff_dock)
         logger.debug("created dock widgets")
