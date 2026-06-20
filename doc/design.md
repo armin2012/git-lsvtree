@@ -1,8 +1,8 @@
 # git-lsvtree-ui Design Document
 
-**Version:** 1.1  
+**Version:** 1.2  
 **Date:** 2026-06-20  
-**Status:** Implemented (Phase 1–4 complete; Phase 5 diff UX in progress)
+**Status:** Implemented (Phase 1–5 complete; Phase 6 dynamic layout in design)
 
 ---
 
@@ -275,22 +275,132 @@ The `DetailPanel` traces back to the raw `VersionNode` via `source_hashes[0]` wh
 
 `TreeLayout` maps `DisplayGraph` → `LayoutGraph` (pixel coordinates) without any Qt dependency.
 
-### Column assignment
-
-`_branch_order()` starts from the `branch_order` hint supplied by the caller (derived from `GraphModel.branches` insertion order, which reflects `BranchRebuilder`'s `column_hint`). Any branch not in the hint is appended in first-encounter order. This guarantees the main branch is always column 0.
-
-### Row assignment
+### 5.1 Row assignment
 
 `_row_by_node()` sorts nodes by `(topo_rank, branch, id)`. Using `topo_rank` (a global topological counter) instead of the per-branch `per_branch_index` ensures cross-branch Y positions are consistent with commit history order.
 
-### Layout constants
+### 5.2 Column assignment — current (static, v1)
+
+`_branch_order()` starts from a hint derived from `GraphModel.branches` insertion order, then appends unseen branches. Each branch occupies one fixed column for the entire height of the canvas. This produces wide layouts when many branches exist, because:
+
+- Every branch occupies its full-height column regardless of how many rows it actually has nodes in.
+- A branch that only exists at rows 50–60 still claims a full-height column, making fork edges span from row 50 all the way across to an empty column slot.
+- Canvas width = `O(total branch count)`.
+
+**Problem**: for a repository with 20 branches, even if each branch has only 5 commits, the canvas is 20 columns wide (3600 px at 180 px/col), with all fork lines spanning nearly the full width.
+
+### 5.3 Column assignment — planned (dynamic, v2): Branch Interval Packing
+
+**Core insight**: a column is a resource shared over time (rows). Two branches can share the same column if their row ranges do not overlap.
+
+#### Definitions
+
+- **Row range** of branch B: `[first_row(B), last_row(B)]` = min and max row indices of all nodes belonging to B in the current `DisplayGraph`.
+- **Parent branch** of B: determined from "branch" edges in the `DisplayGraph`. If edge `(src, dst, "branch")` exists and `display_nodes[src].branch == B`, then `parent_branch(B) = display_nodes[dst].branch`.
+
+#### Interval packing algorithm
+
+```
+Input:  branches with row ranges and parent relationships
+Output: col[B] for every branch B
+
+1. main branch → col 0
+
+2. Build branch dependency order:
+   Process branches in topological order of the branch tree
+   (parent branch always before child branch).
+   Within the same parent, sort by start_row ascending
+   (earliest-forking branches get lower columns → stay closer to main).
+
+3. For each branch B in dependency order:
+   a. min_col = col[parent_branch(B)] + 1       # child must be right of parent
+   b. For col = min_col, min_col+1, min_col+2, …:
+      If col has no assigned branch whose row range overlaps
+      [first_row(B) - GAP, last_row(B) + GAP]:
+          col[B] = col; break
+   (GAP = 1 row, to avoid headers of adjacent branches visually touching)
+
+4. col_intervals[col].append((first_row(B), last_row(B), B))
+```
+
+#### Visual comparison
+
+```
+Scenario: main (rows 0–10), feat-A (rows 2–4, child of main),
+          feat-B (rows 7–9, child of main), feat-C (rows 3–5, child of feat-A)
+
+Static layout (4 columns, 720 px wide):
+       col 0    col 1    col 2    col 3
+row 0:  main
+row 1:  main
+row 2:  main   feat-A            
+row 3:  main   feat-A   feat-C   
+row 4:  main   feat-A   feat-C   
+row 5:  main            feat-C   
+row 6:  main                     
+row 7:  main            feat-B   
+row 8:  main            feat-B   
+row 9:  main            feat-B   
+fork edge (main→feat-B): 2 columns wide
+
+Dynamic layout (3 columns, 540 px wide):
+       col 0    col 1    col 2
+row 0:  main
+row 1:  main
+row 2:  main   feat-A            
+row 3:  main   feat-A   feat-C   
+row 4:  main   feat-A   feat-C   
+row 5:  main            feat-C   
+row 6:  main                     
+row 7:  main   feat-B            ← reuses col 1 (no overlap with feat-A rows 2–4)
+row 8:  main   feat-B            
+row 9:  main   feat-B            
+fork edge (main→feat-B): 1 column wide
+```
+
+feat-C must be in col ≥ 2 (child of feat-A which is in col 1). feat-B and feat-A are siblings (both children of main) with non-overlapping row ranges, so they share col 1. The result: 3 columns instead of 4 for this example, and fork edges are always exactly 1 column wide.
+
+For a repository with 20 branches that all fork from main at different times with non-overlapping ranges: static layout → 20 columns; dynamic layout → 1 column (all branches share col 1, multiplexed over time). Canvas width = `O(max branching depth)`.
+
+#### Branch header positioning
+
+With dynamic layout, branch headers are **no longer pinned to the top of the canvas**. Instead, each branch header is placed just above the branch's first (topologically earliest) node:
+
+```
+header.rect.y = top_margin + first_row(B) * row_height - header_height - 4
+header.rect.x = left_margin + col[B] * col_width - header_width / 2
+```
+
+This mirrors ClearCase lsvtree behavior: the branch label appears at the point where the branch forks, not floating at the top of an empty column.
+
+#### Edge routing implications
+
+- **Fork (branch) edges**: with dynamic columns, the fork edge from the parent commit to the first commit of the child branch is always exactly 1 column wide (horizontal or 1-step diagonal). This eliminates the "stretched fork" problem.
+- **Merge edges**: similarly shortened, since the merge source and target are now horizontally close.
+- **Cross-branch interference**: a straight line between two nodes may still cross intermediate branch columns. This is acceptable for v2; curve routing (Bezier waypoints around intervening nodes) is deferred to v3.
+
+#### Implementation plan
+
+Changes confined to `layout/tree_layout.py`:
+
+| Step | Change |
+|------|--------|
+| New method `_row_ranges(display_graph, row_by_node)` | Returns `dict[branch, (first_row, last_row)]` |
+| New method `_parent_branch_map(display_graph)` | Returns `dict[branch, parent_branch]` from "branch" edges |
+| New method `_pack_columns(branches, row_ranges, parent_map, main_branch)` | Interval packing → `dict[branch, int]` |
+| Update `layout()` | Replace `_branch_order()` call with `_pack_columns()` call |
+| Update `headers` block | Position headers at `first_row` instead of `top_margin` |
+
+`LayoutGraph`, `LayoutNode`, `LayoutEdge`, `BranchHeader`, and all UI layers are **unchanged** — column numbers flow through the same pixel formula `x = left_margin + col * col_width`.
+
+### 5.4 Layout constants
 
 | Constant | Value | Purpose |
 |----------|-------|---------|
 | `branch_col_width` | 180 px | Horizontal distance between branch columns |
 | `row_height` | 54 px | Vertical distance between version rows |
 | `header_height` | 32 px | Height reserved for branch header rectangles |
-| `top_margin` | 48 px | Space above the first header |
+| `top_margin` | 48 px | Space above the first node row |
 | `left_margin` | 40 px | Space left of the first column |
 | `node_radius` | 10 px | Version node circle radius |
 | `branch_header_width` | 90 px | Branch header rectangle width |
@@ -528,6 +638,13 @@ Two-version selection, DiffPanel, collapsed run display (`CollapsedRunItem`), si
 - **Status bar warning**: partial key selection warning propagated from `KeySelector` through `GraphLoadResult.warning`.
 - **Export PNG**: `QPixmap` + `QPainter` render of `QGraphicsScene`.
 - **Level-of-detail**: labels hidden at zoom < 35% (`GraphScene.update_lod()`).
+
+### Phase 6 — Dynamic Layout (Branch Interval Packing)
+
+Replace static column assignment with dynamic interval packing (see §5.3):
+- Implement `_row_ranges()`, `_parent_branch_map()`, `_pack_columns()` in `tree_layout.py`.
+- Reposition branch headers to fork-point row instead of canvas top.
+- Validate: canvas width for a 20-branch repo should be ≤ O(max nesting depth) × col_width.
 
 ### Phase 5 — Diff UX & Edge Arrows
 - **Branch name resolution**: `GitRepo.current_branch()` via `git rev-parse --abbrev-ref HEAD`; passed to `BranchRebuilder` so `master`/`develop` repos are labeled correctly.
