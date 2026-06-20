@@ -13,3 +13,10 @@ dependencies = [
 
 [project.scripts]
 git-lsvtree-ui = "git_lsvtree_ui.__main__:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v"

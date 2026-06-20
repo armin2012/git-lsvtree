@@ -203,15 +203,19 @@ class TreeLayout:
         return {b: (min(rows), max(rows)) for b, rows in bucket.items()}
 
     def _parent_branch_map(self, display_graph: DisplayGraph) -> dict[str, str]:
-        """Infer {child_branch: parent_branch} from branch-kind edges."""
+        """Infer {child_branch: parent_branch} from branch-kind edges.
+
+        Branch edges go src=parent_branch_commit → dst=child_branch_first_commit
+        (both HistoryLoader and BranchRebuilder use older→newer direction).
+        """
         parent_map: dict[str, str] = {}
         for edge in display_graph.edges:
             if edge.kind != "branch":
                 continue
             if edge.src not in display_graph.nodes or edge.dst not in display_graph.nodes:
                 continue
-            child_b = display_graph.nodes[edge.src].branch
-            parent_b = display_graph.nodes[edge.dst].branch
+            parent_b = display_graph.nodes[edge.src].branch  # src = parent branch
+            child_b = display_graph.nodes[edge.dst].branch   # dst = child branch
             if child_b != parent_b:
                 parent_map.setdefault(child_b, parent_b)
         return parent_map
