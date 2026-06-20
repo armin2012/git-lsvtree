@@ -73,12 +73,15 @@ class GraphView(QGraphicsView):
         super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event):  # noqa: N802
-        logger.debug("graph view wheel delta=%s", event.angleDelta().y())
-        if event.angleDelta().y() > 0:
-            self.zoom_in()
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            logger.debug("graph view wheel zoom delta=%s", event.angleDelta().y())
+            if event.angleDelta().y() > 0:
+                self.zoom_in()
+            else:
+                self.zoom_out()
+            event.accept()
         else:
-            self.zoom_out()
-        event.accept()
+            super().wheelEvent(event)
 
     def _set_zoom(self, zoom: float) -> None:
         zoom = max(0.1, min(8.0, zoom))
