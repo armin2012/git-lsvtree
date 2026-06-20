@@ -5,7 +5,9 @@ import math
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QBrush, QColor, QPainterPath, QPen, QPolygonF
-from PySide6.QtWidgets import QGraphicsEllipseItem, QGraphicsPathItem, QGraphicsRectItem, QGraphicsSimpleTextItem
+from PySide6.QtWidgets import (
+    QGraphicsEllipseItem, QGraphicsPathItem, QGraphicsRectItem, QGraphicsSimpleTextItem,
+)
 
 from git_lsvtree_ui.layout.tree_layout import BranchHeader, LayoutEdge, LayoutNode
 
@@ -38,12 +40,25 @@ class VersionNodeItem(QGraphicsEllipseItem):
         self.label_item = QGraphicsSimpleTextItem(node.label, self)
         self.label_item.setBrush(QBrush(QColor("#111827")))
         self.label_item.setPos(node.center.x + r + 4, node.center.y - r)
-        self.tag_label_item: QGraphicsSimpleTextItem | None = None
+        self.tag_label_item: QGraphicsRectItem | None = None
         if node.tags:
-            tag_text = "  ".join(f"[{t}]" for t in node.tags[:3])
-            self.tag_label_item = QGraphicsSimpleTextItem(tag_text, self)
-            self.tag_label_item.setBrush(QBrush(QColor("#92400e")))
-            self.tag_label_item.setPos(node.center.x + r + 4, node.center.y + 2)
+            tag_text = "  ".join(node.tags[:2])
+            # measure text to size the badge background
+            _tmp = QGraphicsSimpleTextItem(tag_text)
+            _br = _tmp.boundingRect()
+            _px, _py = 4, 1
+            _bw, _bh = _br.width() + _px * 2, _br.height() + _py * 2
+            # position badge to the right of node, just below the version-number label
+            _bx = node.center.x + r + 4
+            _by = node.center.y - r + _br.height() + 4
+            badge = QGraphicsRectItem(QRectF(0, 0, _bw, _bh), self)
+            badge.setPos(_bx, _by)
+            badge.setBrush(QBrush(QColor("#fef3c7")))
+            badge.setPen(QPen(QColor("#d97706"), 0.8))
+            tag_lbl = QGraphicsSimpleTextItem(tag_text, badge)
+            tag_lbl.setPos(_px, _py)
+            tag_lbl.setBrush(QBrush(QColor("#92400e")))
+            self.tag_label_item = badge
 
     def set_selected_state(self, on: bool) -> None:
         self._selected_state = on

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import logging
 import re
 
@@ -132,6 +133,8 @@ class HistoryLoader:
                 label = f"merge from '{parent.label}'" if parent.label else ""
                 edges.append(Edge(parent.hash, commit, "merge", label))
 
+        nodes = self._annotate_with_repo_tags(nodes)
+
         logger.info(
             "loaded file history commits=%d edges=%d rel_path=%s",
             len(nodes),
@@ -145,6 +148,33 @@ class HistoryLoader:
             order_oldest_first=order_oldest,
             branches={},
         )
+
+    def _annotate_with_repo_tags(self, nodes: dict[str, VersionNode]) -> dict[str, VersionNode]:
+        """Inject repo-wide git tags onto the nearest file-history ancestor node.
+
+        git log -- <file> only captures tags on commits that directly touched the file.
+        Release tags land on merge/release commits that often don't touch any single file,
+        so we look up each tag separately with rev-list -1 to find its file-history anchor.
+        """
+        result = self.repo.git("tag", "-l", "--sort=-version:refname")
+        if result.returncode != 0 or not result.stdout.strip():
+            return nodes
+
+        all_tags = result.stdout.strip().splitlines()[:50]
+        updated = dict(nodes)
+
+        for tag in all_tags:
+            r = self.repo.git("rev-list", "-1", tag, "--", self.repo.rel_path)
+            if r.returncode != 0 or not r.stdout.strip():
+                continue
+            commit_hash = r.stdout.strip()
+            if commit_hash not in updated:
+                continue
+            existing = updated[commit_hash]
+            if tag not in existing.tags:
+                updated[commit_hash] = dataclasses.replace(existing, tags=existing.tags + (tag,))
+
+        return updated
 
     def load_message(self, commit: str) -> str:
         logger.debug("loading commit message rel_path=%s commit=%s", self.repo.rel_path, commit[:12])

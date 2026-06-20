@@ -33,14 +33,28 @@ def _log_entry(
     )
 
 
-def _mock_repo(log_output: str, head_commit: str = "") -> MagicMock:
+def _mock_repo(log_output: str, head_commit: str = "", tags: list[str] | None = None) -> MagicMock:
     repo = MagicMock()
     repo.rel_path = "src/foo.py"
     repo.git_checked.return_value = log_output
-    head = MagicMock()
-    head.returncode = 0 if head_commit else 1
-    head.stdout = head_commit + "\n" if head_commit else ""
-    repo.git.return_value = head
+    _tags = tags or []
+
+    def _git(*args, **kwargs):
+        m = MagicMock()
+        m.returncode = 0
+        if args and args[0] == "tag":
+            # Return configured tag list (empty by default in tests)
+            m.stdout = "\n".join(_tags) + "\n" if _tags else ""
+        elif args and args[0] == "rev-list" and len(args) >= 2 and args[1] == "-1":
+            # rev-list -1 <ref> [--] [path]: return head_commit as the anchor
+            m.stdout = head_commit + "\n" if head_commit else ""
+            m.returncode = 0 if head_commit else 1
+        else:
+            m.returncode = 0 if head_commit else 1
+            m.stdout = head_commit + "\n" if head_commit else ""
+        return m
+
+    repo.git.side_effect = _git
     return repo
 
 
