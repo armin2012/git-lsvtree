@@ -37,10 +37,16 @@ def parse_tags(decorations: str) -> tuple[str, ...]:
 
 
 class HistoryLoader:
-    def __init__(self, repo: GitRepo, include_all: bool = False):
-        logger.debug("init history loader rel_path=%s include_all=%s", repo.rel_path, include_all)
+    def __init__(self, repo: GitRepo, include_all: bool = False, include_repo_tags: bool = False):
+        logger.debug(
+            "init history loader rel_path=%s include_all=%s include_repo_tags=%s",
+            repo.rel_path,
+            include_all,
+            include_repo_tags,
+        )
         self.repo = repo
         self.include_all = include_all
+        self.include_repo_tags = include_repo_tags
 
     def load(self) -> GraphModel:
         all_args = ("--all",) if self.include_all else ()
@@ -133,7 +139,8 @@ class HistoryLoader:
                 label = f"merge from '{parent.label}'" if parent.label else ""
                 edges.append(Edge(parent.hash, commit, "merge", label))
 
-        nodes = self._annotate_with_repo_tags(nodes)
+        if self.include_repo_tags:
+            nodes = self._annotate_with_repo_tags(nodes)
 
         logger.info(
             "loaded file history commits=%d edges=%d rel_path=%s",

@@ -13,6 +13,11 @@ from .geometry import Point, Rect
 
 
 logger = logging.getLogger(__name__)
+_CANDIDATE_POOL = 5
+_CROSSING_WEIGHT = 200.0
+_COLUMN_PENALTY = 2.0
+_NEW_COLUMN_PENALTY = 25.0
+_EXTRA_DEPTH_PENALTY = 10.0
 
 
 @dataclass(frozen=True)
@@ -94,7 +99,21 @@ class TreeLayout:
         ))
         row_ranges = self._row_ranges(display_graph, row_by_node)
         parent_map = self._parent_branch_map(display_graph)
-        branch_col = self._pack_columns(all_branches, row_ranges, parent_map, main_branch)
+        merge_edges = self._merge_branch_edges(display_graph, row_by_node)
+        branch_col = self._pack_columns(
+            all_branches,
+            row_ranges,
+            parent_map,
+            main_branch,
+            merge_edges=merge_edges,
+        )
+        if merge_edges:
+            branch_col = self._swap_optimize_columns(
+                branch_col,
+                row_ranges,
+                parent_map,
+                merge_edges,
+            )
 
         nodes: dict[str, LayoutNode] = {}
         for node_id, node in display_graph.nodes.items():
@@ -186,9 +205,13 @@ class TreeLayout:
         hint: tuple[str, ...] | None,
     ) -> str:
         if hint:
+            logger.debug("infer main branch from hint branch=%s", hint[0])
             return hint[0]
         if display_graph.nodes:
-            return min(display_graph.nodes.values(), key=lambda n: n.topo_rank).branch
+            branch = min(display_graph.nodes.values(), key=lambda n: n.topo_rank).branch
+            logger.debug("infer main branch from oldest node branch=%s", branch)
+            return branch
+        logger.debug("infer main branch from empty graph")
         return ""
 
     def _row_ranges(
@@ -218,7 +241,53 @@ class TreeLayout:
             child_b = display_graph.nodes[edge.dst].branch   # dst = child branch
             if child_b != parent_b:
                 parent_map.setdefault(child_b, parent_b)
+        logger.debug("parent branch map inferred count=%d", len(parent_map))
         return parent_map
+
+    def _merge_branch_edges(
+        self,
+        display_graph: DisplayGraph,
+        row_by_node: dict[str, int],
+    ) -> list[tuple[str, str, int, int]]:
+        result: list[tuple[str, str, int, int]] = []
+        for edge in display_graph.edges:
+            if edge.kind != "merge":
+                continue
+            if edge.src not in display_graph.nodes or edge.dst not in display_graph.nodes:
+                logger.debug("skip merge branch edge missing endpoint src=%s dst=%s", edge.src, edge.dst)
+                continue
+            if edge.src not in row_by_node or edge.dst not in row_by_node:
+                logger.debug("skip merge branch edge missing row src=%s dst=%s", edge.src, edge.dst)
+                continue
+            src = display_graph.nodes[edge.src]
+            dst = display_graph.nodes[edge.dst]
+            result.append((src.branch, dst.branch, row_by_node[edge.src], row_by_node[edge.dst]))
+        logger.debug("merge branch edges extracted count=%d", len(result))
+        return result
+
+    def _crossing_count(
+        self,
+        merge_edges: list[tuple[str, str, int, int]],
+        col: dict[str, int],
+    ) -> int:
+        count = 0
+        for i, edge_a in enumerate(merge_edges):
+            src_a, dst_a, src_row_a, dst_row_a = edge_a
+            if src_a not in col or dst_a not in col or col[src_a] == col[dst_a]:
+                continue
+            endpoints_a = {src_a, dst_a}
+            for edge_b in merge_edges[i + 1:]:
+                src_b, dst_b, src_row_b, dst_row_b = edge_b
+                if src_b not in col or dst_b not in col or col[src_b] == col[dst_b]:
+                    continue
+                if endpoints_a & {src_b, dst_b}:
+                    continue
+                if not self._strict_row_spans_overlap(src_row_a, dst_row_a, src_row_b, dst_row_b):
+                    continue
+                if self._cols_strictly_interleave(col[src_a], col[dst_a], col[src_b], col[dst_b]):
+                    count += 1
+        logger.debug("merge crossing count=%d edge_count=%d", count, len(merge_edges))
+        return count
 
     def _pack_columns(
         self,
@@ -226,6 +295,7 @@ class TreeLayout:
         row_ranges: dict[str, tuple[int, int]],
         parent_map: dict[str, str],
         main_branch: str,
+        merge_edges: list[tuple[str, str, int, int]] | None = None,
     ) -> dict[str, int]:
         """Assign columns via interval packing.
 
@@ -240,15 +310,31 @@ class TreeLayout:
         def overlaps(a: tuple[int, int], b: tuple[int, int]) -> bool:
             return a[0] <= b[1] + GAP and b[0] <= a[1] + GAP
 
+        def column_available(branch: str, column: int) -> bool:
+            rng = row_ranges.get(branch, (0, 0))
+            return not any(overlaps(rng, slot) for slot in col_slots.get(column, []))
+
+        def legal_candidates(branch: str, min_c: int) -> list[int]:
+            candidates: list[int] = []
+            c = min_c
+            while len(candidates) < _CANDIDATE_POOL:
+                if column_available(branch, c):
+                    candidates.append(c)
+                c += 1
+            return candidates
+
         def assign(branch: str, min_c: int) -> None:
             rng = row_ranges.get(branch, (0, 0))
-            c = min_c
-            while True:
-                if not any(overlaps(rng, slot) for slot in col_slots.get(c, [])):
-                    col[branch] = c
-                    col_slots.setdefault(c, []).append(rng)
-                    return
-                c += 1
+            candidates = legal_candidates(branch, min_c)
+            if merge_edges:
+                best = min(
+                    candidates,
+                    key=lambda c: self._candidate_column_score(branch, c, candidates[0], min_c, col, merge_edges),
+                )
+            else:
+                best = candidates[0]
+            col[branch] = best
+            col_slots.setdefault(best, []).append(rng)
 
         branch_set = set(branches)
 
@@ -293,8 +379,207 @@ class TreeLayout:
             if branch not in col:
                 assign(branch, 1)
 
+        if not self._columns_satisfy_parent_constraints(col, parent_map):
+            logger.warning("packed columns violate parent constraints col=%s parent_map=%s", col, parent_map)
+        if not self._columns_satisfy_interval_packing(col, row_ranges):
+            logger.warning("packed columns violate interval packing col=%s row_ranges=%s", col, row_ranges)
         logger.debug("pack_columns result=%s", col)
         return col
+
+    def _candidate_column_score(
+        self,
+        branch: str,
+        candidate_col: int,
+        baseline_col: int,
+        min_col: int,
+        placed_cols: dict[str, int],
+        merge_edges: list[tuple[str, str, int, int]],
+    ) -> float:
+        baseline = dict(placed_cols)
+        baseline[branch] = baseline_col
+        candidate = dict(placed_cols)
+        candidate[branch] = candidate_col
+        crossing_delta = self._crossing_count(merge_edges, candidate) - self._crossing_count(merge_edges, baseline)
+        span_cost = self._merge_span_cost(branch, candidate_col, placed_cols, merge_edges)
+        current_max_col = max(placed_cols.values(), default=0)
+        new_column_penalty = _NEW_COLUMN_PENALTY if candidate_col > current_max_col else 0.0
+        extra_depth = max(0, candidate_col - min_col - 1)
+        extra_depth_penalty = extra_depth * _EXTRA_DEPTH_PENALTY
+        score = (
+            crossing_delta * _CROSSING_WEIGHT
+            + span_cost
+            + candidate_col * _COLUMN_PENALTY
+            + new_column_penalty
+            + extra_depth_penalty
+        )
+        logger.debug(
+            (
+                "candidate column score branch=%s candidate=%d baseline=%d min_col=%d crossing_delta=%d "
+                "span_cost=%s new_column_penalty=%s extra_depth_penalty=%s score=%s"
+            ),
+            branch,
+            candidate_col,
+            baseline_col,
+            min_col,
+            crossing_delta,
+            span_cost,
+            new_column_penalty,
+            extra_depth_penalty,
+            score,
+        )
+        return score
+
+    def _merge_span_cost(
+        self,
+        branch: str,
+        candidate_col: int,
+        placed_cols: dict[str, int],
+        merge_edges: list[tuple[str, str, int, int]],
+    ) -> float:
+        cost = 0.0
+        for src_branch, dst_branch, src_row, dst_row in merge_edges:
+            partner = ""
+            if src_branch == branch:
+                partner = dst_branch
+            elif dst_branch == branch:
+                partner = src_branch
+            if not partner or partner not in placed_cols:
+                continue
+            row_weight = max(1, abs(dst_row - src_row))
+            cost += abs(candidate_col - placed_cols[partner]) * row_weight
+        return cost
+
+    def _swap_optimize_columns(
+        self,
+        col: dict[str, int],
+        row_ranges: dict[str, tuple[int, int]],
+        parent_map: dict[str, str],
+        merge_edges: list[tuple[str, str, int, int]],
+        max_passes: int = 3,
+    ) -> dict[str, int]:
+        """Reduce merge crossings with bounded branch-column swaps."""
+        logger.debug(
+            "swap optimize columns start branches=%d merge_edges=%d max_passes=%d",
+            len(col),
+            len(merge_edges),
+            max_passes,
+        )
+        if max_passes <= 0 or not merge_edges:
+            logger.debug("swap optimize columns skipped")
+            return dict(col)
+
+        optimized = dict(col)
+        branches = list(optimized)
+        for pass_index in range(max_passes):
+            changed = False
+            before_pass = self._crossing_count(merge_edges, optimized)
+            logger.debug(
+                "swap optimize pass start pass=%d crossings=%d",
+                pass_index + 1,
+                before_pass,
+            )
+            for left_index, left in enumerate(branches):
+                for right in branches[left_index + 1:]:
+                    if optimized[left] == optimized[right]:
+                        continue
+                    swapped = dict(optimized)
+                    swapped[left], swapped[right] = swapped[right], swapped[left]
+                    if not self._columns_satisfy_parent_constraints(swapped, parent_map):
+                        logger.debug("reject swap parent constraint left=%s right=%s", left, right)
+                        continue
+                    if not self._columns_satisfy_interval_packing(swapped, row_ranges):
+                        logger.debug("reject swap interval packing left=%s right=%s", left, right)
+                        continue
+
+                    before = self._crossing_count(merge_edges, optimized)
+                    after = self._crossing_count(merge_edges, swapped)
+                    if after < before:
+                        logger.debug(
+                            "accept swap left=%s right=%s before=%d after=%d",
+                            left,
+                            right,
+                            before,
+                            after,
+                        )
+                        optimized = swapped
+                        changed = True
+
+            after_pass = self._crossing_count(merge_edges, optimized)
+            logger.debug(
+                "swap optimize pass complete pass=%d before=%d after=%d changed=%s",
+                pass_index + 1,
+                before_pass,
+                after_pass,
+                changed,
+            )
+            if not changed:
+                break
+
+        logger.debug("swap optimize columns complete result=%s", optimized)
+        return optimized
+
+    def _columns_satisfy_parent_constraints(
+        self,
+        col: dict[str, int],
+        parent_map: dict[str, str],
+    ) -> bool:
+        for child, parent in parent_map.items():
+            if child not in col or parent not in col:
+                continue
+            if col[child] <= col[parent]:
+                logger.debug(
+                    "parent constraint violation child=%s parent=%s child_col=%d parent_col=%d",
+                    child,
+                    parent,
+                    col[child],
+                    col[parent],
+                )
+                return False
+        return True
+
+    def _columns_satisfy_interval_packing(
+        self,
+        col: dict[str, int],
+        row_ranges: dict[str, tuple[int, int]],
+    ) -> bool:
+        by_col: dict[int, list[tuple[str, tuple[int, int]]]] = {}
+        for branch, column in col.items():
+            if branch not in row_ranges:
+                continue
+            rng = row_ranges[branch]
+            for other_branch, other_rng in by_col.get(column, []):
+                if self._row_ranges_overlap_with_gap(rng, other_rng):
+                    logger.debug(
+                        "interval packing violation branch=%s other=%s column=%d branch_range=%s other_range=%s",
+                        branch,
+                        other_branch,
+                        column,
+                        rng,
+                        other_rng,
+                    )
+                    return False
+            by_col.setdefault(column, []).append((branch, rng))
+        return True
+
+    @staticmethod
+    def _row_ranges_overlap_with_gap(
+        a: tuple[int, int],
+        b: tuple[int, int],
+        gap: int = 1,
+    ) -> bool:
+        return a[0] <= b[1] + gap and b[0] <= a[1] + gap
+
+    @staticmethod
+    def _strict_row_spans_overlap(a0: int, a1: int, b0: int, b1: int) -> bool:
+        lo_a, hi_a = sorted((a0, a1))
+        lo_b, hi_b = sorted((b0, b1))
+        return max(lo_a, lo_b) < min(hi_a, hi_b)
+
+    @staticmethod
+    def _cols_strictly_interleave(a0: int, a1: int, b0: int, b1: int) -> bool:
+        lo_a, hi_a = sorted((a0, a1))
+        lo_b, hi_b = sorted((b0, b1))
+        return (lo_a < lo_b < hi_a < hi_b) or (lo_b < lo_a < hi_b < hi_a)
 
     # ── row / bounds helpers ───────────────────────────────────────────────
 

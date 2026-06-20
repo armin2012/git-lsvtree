@@ -27,6 +27,7 @@ class GraphLoadRequest:
     key_threshold: int = 300
     collapse_enabled: bool = True
     include_all: bool = False
+    include_repo_tags: bool = False
     expanded_runs: frozenset[str] | None = None
 
 
@@ -64,7 +65,13 @@ class GraphLoaderWorker(QRunnable):
         logger.info("loading graph in worker file=%s mode=%s", self.request.file_path, self.request.mode)
         try:
             repo = GitRepo.from_file(self.request.file_path)
-            graph = HistoryLoader(repo, include_all=self.request.include_all).load()
+            graph = HistoryLoader(
+                repo,
+                include_all=self.request.include_all,
+                include_repo_tags=self.request.include_repo_tags,
+            ).load()
+            if not graph.nodes:
+                raise ValueError(f"no Git history for file: {repo.rel_path}")
             graph = BranchRebuilder().rebuild(graph, main_branch=repo.current_branch())
             key_result = KeySelector().select(
                 graph,

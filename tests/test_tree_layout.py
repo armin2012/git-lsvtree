@@ -97,6 +97,63 @@ def test_parent_branch_map_skips_missing_nodes():
     assert "ghost" not in pm
 
 
+# ── merge crossing metric ───────────────────────────────────────────────────
+
+def test_merge_branch_edges_skip_missing_endpoints():
+    from git_lsvtree_ui.core.graph_model import DisplayEdge, DisplayGraph
+
+    dg = make_display_graph(
+        [("a0", "A", 0, ()), ("m0", "main", 3, ())],
+        [],
+    )
+    dg = DisplayGraph(dict(dg.nodes), (DisplayEdge("a0", "m0", "merge"), DisplayEdge("ghost", "m0", "merge")))
+    rows = TreeLayout(S)._row_by_node(dg)
+
+    edges = TreeLayout(S)._merge_branch_edges(dg, rows)
+
+    assert edges == [("A", "main", rows["a0"], rows["m0"])]
+
+
+def test_crossing_count_shared_endpoint_not_crossing():
+    merge_edges = [
+        ("A", "main", 0, 10),
+        ("B", "main", 2, 8),
+    ]
+    col = {"main": 0, "A": 3, "B": 1}
+
+    assert TreeLayout(S)._crossing_count(merge_edges, col) == 0
+
+
+def test_crossing_count_strict_interleave_counts_one():
+    merge_edges = [
+        ("A", "B", 0, 10),
+        ("C", "D", 2, 8),
+    ]
+    col = {"A": 0, "B": 2, "C": 1, "D": 3}
+
+    assert TreeLayout(S)._crossing_count(merge_edges, col) == 1
+
+
+def test_crossing_count_touching_rows_not_crossing():
+    merge_edges = [
+        ("A", "B", 0, 5),
+        ("C", "D", 5, 10),
+    ]
+    col = {"A": 0, "B": 2, "C": 1, "D": 3}
+
+    assert TreeLayout(S)._crossing_count(merge_edges, col) == 0
+
+
+def test_crossing_count_ignores_same_column_merge_edge():
+    merge_edges = [
+        ("A", "B", 0, 10),
+        ("C", "D", 2, 8),
+    ]
+    col = {"A": 1, "B": 1, "C": 0, "D": 2}
+
+    assert TreeLayout(S)._crossing_count(merge_edges, col) == 0
+
+
 # ── _pack_columns ──────────────────────────────────────────────────────────
 
 def test_pack_columns_main_always_col0():
@@ -147,6 +204,175 @@ def test_pack_columns_no_parent_treated_as_root():
     assert col["orphan"] >= 1
 
 
+def test_columns_satisfy_parent_constraints_accepts_valid_columns():
+    col = {"main": 0, "feature": 1, "nested": 2}
+    pm = {"feature": "main", "nested": "feature"}
+    assert TreeLayout(S)._columns_satisfy_parent_constraints(col, pm)
+
+
+def test_columns_satisfy_parent_constraints_rejects_child_not_right_of_parent():
+    col = {"main": 0, "feature": 0}
+    pm = {"feature": "main"}
+    assert not TreeLayout(S)._columns_satisfy_parent_constraints(col, pm)
+
+
+def test_columns_satisfy_interval_packing_accepts_non_overlapping_same_column():
+    col = {"feature-a": 1, "feature-b": 1}
+    rng = {"feature-a": (2, 4), "feature-b": (7, 9)}
+    assert TreeLayout(S)._columns_satisfy_interval_packing(col, rng)
+
+
+def test_columns_satisfy_interval_packing_rejects_overlap_with_gap():
+    col = {"feature-a": 1, "feature-b": 1}
+    rng = {"feature-a": (2, 4), "feature-b": (5, 9)}
+    assert not TreeLayout(S)._columns_satisfy_interval_packing(col, rng)
+
+
+def test_pack_columns_output_satisfies_constraints():
+    rng = {"main": (0, 10), "A": (2, 5), "B": (7, 9), "C": (3, 4)}
+    pm = {"A": "main", "B": "main", "C": "A"}
+    layout = TreeLayout(S)
+    col = layout._pack_columns(["main", "A", "B", "C"], rng, pm, "main")
+    assert layout._columns_satisfy_parent_constraints(col, pm)
+    assert layout._columns_satisfy_interval_packing(col, rng)
+
+
+def test_pack_columns_without_merge_edges_keeps_greedy_behavior():
+    rng = {"main": (0, 10), "X": (1, 5), "A": (2, 3), "B": (7, 8)}
+    pm = {"X": "main", "A": "main", "B": "main"}
+
+    col = TreeLayout(S)._pack_columns(["main", "X", "A", "B"], rng, pm, "main")
+
+    assert col["X"] == 1
+    assert col["A"] == 2
+    assert col["B"] == 1
+
+
+def test_pack_columns_merge_span_prefers_legal_column_near_partner():
+    rng = {"main": (0, 10), "X": (1, 5), "A": (2, 3), "B": (7, 8)}
+    pm = {"X": "main", "A": "main", "B": "main"}
+    merge_edges = [("A", "B", 2, 8)]
+
+    layout = TreeLayout(S)
+    col = layout._pack_columns(["main", "X", "A", "B"], rng, pm, "main", merge_edges=merge_edges)
+
+    assert col["X"] == 1
+    assert col["A"] == 2
+    assert col["B"] == 2
+    assert layout._columns_satisfy_parent_constraints(col, pm)
+    assert layout._columns_satisfy_interval_packing(col, rng)
+
+
+def test_pack_columns_merge_aware_does_not_violate_child_constraint():
+    rng = {"main": (0, 10), "A": (1, 3), "B": (4, 5)}
+    pm = {"A": "main", "B": "A"}
+    merge_edges = [("main", "B", 0, 5)]
+
+    col = TreeLayout(S)._pack_columns(["main", "A", "B"], rng, pm, "main", merge_edges=merge_edges)
+
+    assert col["main"] < col["A"] < col["B"]
+
+
+def test_candidate_column_score_prefers_narrower_column_when_crossing_equal():
+    layout = TreeLayout(S)
+    placed = {"main": 0}
+    merge_edges = [("A", "B", 0, 1)]
+
+    narrow = layout._candidate_column_score("A", 1, 1, 1, placed, merge_edges)
+    wide = layout._candidate_column_score("A", 3, 1, 1, placed, merge_edges)
+
+    assert narrow < wide
+
+
+def test_candidate_column_score_rejects_far_column_for_small_span_gain():
+    layout = TreeLayout(S)
+    placed = {"main": 0, "partner": 4}
+    merge_edges = [("A", "partner", 0, 1)]
+
+    narrow = layout._candidate_column_score("A", 1, 1, 1, placed, merge_edges)
+    far = layout._candidate_column_score("A", 4, 1, 1, placed, merge_edges)
+
+    assert narrow < far
+
+
+def test_swap_optimize_reduces_crossings_when_constraints_allow():
+    layout = TreeLayout(S)
+    col = {"A": 0, "B": 2, "C": 1, "D": 3}
+    row_ranges = {"A": (0, 10), "B": (0, 10), "C": (0, 10), "D": (0, 10)}
+    merge_edges = [("A", "B", 0, 10), ("C", "D", 2, 8)]
+
+    optimized = layout._swap_optimize_columns(col, row_ranges, {}, merge_edges)
+
+    assert layout._crossing_count(merge_edges, optimized) < layout._crossing_count(merge_edges, col)
+    assert layout._columns_satisfy_parent_constraints(optimized, {})
+    assert layout._columns_satisfy_interval_packing(optimized, row_ranges)
+
+
+def test_swap_optimize_rejects_parent_child_violation(monkeypatch):
+    layout = TreeLayout(S)
+    col = {"A": 0, "C": 1}
+    row_ranges = {"A": (0, 1), "C": (0, 1)}
+    parent_map = {"C": "A"}
+    merge_edges = [("A", "C", 0, 1)]
+
+    def fake_crossing_count(_merge_edges, candidate_col):
+        return 0 if candidate_col == {"A": 1, "C": 0} else 1
+
+    monkeypatch.setattr(layout, "_crossing_count", fake_crossing_count)
+
+    optimized = layout._swap_optimize_columns(col, row_ranges, parent_map, merge_edges)
+
+    assert optimized == col
+    assert layout._columns_satisfy_parent_constraints(optimized, parent_map)
+
+
+def test_swap_optimize_rejects_interval_overlap(monkeypatch):
+    layout = TreeLayout(S)
+    col = {"A": 0, "B": 1, "C": 1}
+    row_ranges = {"A": (10, 11), "B": (0, 1), "C": (10, 11)}
+    merge_edges = [("A", "B", 10, 0)]
+
+    def fake_crossing_count(_merge_edges, candidate_col):
+        return 0 if candidate_col == {"A": 1, "B": 0, "C": 1} else 1
+
+    monkeypatch.setattr(layout, "_crossing_count", fake_crossing_count)
+
+    optimized = layout._swap_optimize_columns(col, row_ranges, {}, merge_edges)
+
+    assert optimized == col
+    assert layout._columns_satisfy_interval_packing(optimized, row_ranges)
+
+
+def test_swap_optimize_stops_after_max_passes():
+    layout = TreeLayout(S)
+    col = {"A": 0, "B": 2, "C": 1, "D": 3}
+    row_ranges = {"A": (0, 10), "B": (0, 10), "C": (0, 10), "D": (0, 10)}
+    merge_edges = [("A", "B", 0, 10), ("C", "D", 2, 8)]
+
+    optimized = layout._swap_optimize_columns(col, row_ranges, {}, merge_edges, max_passes=0)
+
+    assert optimized == col
+
+
+def test_layout_invokes_swap_optimizer_for_merge_edges(monkeypatch):
+    calls = []
+
+    def fake_swap(self, col, row_ranges, parent_map, merge_edges, max_passes=3):
+        calls.append((dict(col), dict(row_ranges), dict(parent_map), list(merge_edges), max_passes))
+        return col
+
+    monkeypatch.setattr(TreeLayout, "_swap_optimize_columns", fake_swap)
+    dg = make_display_graph(
+        [("a0", "A", 0, ()), ("m0", "main", 1, ())],
+        [("a0", "m0", "merge")],
+    )
+
+    TreeLayout(S).layout(dg, branch_order=("main", "A"))
+
+    assert len(calls) == 1
+    assert calls[0][3] == [("A", "main", 0, 1)]
+
+
 # ── layout: coordinates ────────────────────────────────────────────────────
 
 def test_layout_node_x_matches_column():
@@ -175,6 +401,20 @@ def test_layout_two_branch_column_separation():
     feat_x = {n.center.x for n in layout.nodes.values() if n.branch == "feature"}
     assert len(main_x) == 1 and len(feat_x) == 1
     assert list(feat_x)[0] > list(main_x)[0]  # feature is to the right of main
+
+
+def test_layout_respects_non_main_branch_order_hint_for_primary_column():
+    dg = make_display_graph(
+        [("d0", "develop", 0, ()), ("d1", "develop", 1, ()), ("f0", "feature", 2, ())],
+        [("d1", "f0", "branch")],
+    )
+
+    layout = _layout(dg, branch_order=("develop", "feature"))
+
+    develop_x = {n.center.x for n in layout.nodes.values() if n.branch == "develop"}
+    feature_x = {n.center.x for n in layout.nodes.values() if n.branch == "feature"}
+    assert develop_x == {S.left_margin}
+    assert min(feature_x) > S.left_margin
 
 
 # ── layout: edge endpoints ─────────────────────────────────────────────────

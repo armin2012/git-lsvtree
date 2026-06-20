@@ -32,6 +32,7 @@ from git_lsvtree_ui.ui.status_bar import GitLsvtreeStatusBar
 
 
 logger = logging.getLogger(__name__)
+MAX_EXPORT_PIXELS = 12_000_000
 
 
 class MainWindow(QMainWindow):
@@ -311,7 +312,15 @@ class MainWindow(QMainWindow):
         if not path:
             return
         rect = scene.sceneRect()
-        pixmap = QPixmap(int(rect.width()), int(rect.height()))
+        width = max(1, int(rect.width()))
+        height = max(1, int(rect.height()))
+        pixels = width * height
+        if pixels > MAX_EXPORT_PIXELS:
+            scale = (MAX_EXPORT_PIXELS / pixels) ** 0.5
+            width = max(1, int(width * scale))
+            height = max(1, int(height * scale))
+            logger.info("export png scaled to width=%d height=%d", width, height)
+        pixmap = QPixmap(width, height)
         pixmap.fill(Qt.GlobalColor.white)
         painter = QPainter(pixmap)
         scene.render(painter)
@@ -328,7 +337,7 @@ class MainWindow(QMainWindow):
             return
         text_lower = text.lower()
         for node_id, node in self.current_layout.nodes.items():
-            if node_id.startswith(text_lower) or node.label.lower() == text_lower:
+            if node_id.startswith(text_lower) or text_lower in node.label.lower():
                 self.graph_view.scene().highlight_node(node_id)
                 return
         self.graph_view.scene().highlight_node(None)

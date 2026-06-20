@@ -164,6 +164,25 @@ def test_load_tags_parsed():
     assert graph.nodes[c0].tags == ("v2.0",)
 
 
+def test_repo_wide_tag_scan_is_opt_in():
+    c0 = "a" * 40
+    repo = _mock_repo(_log_entry(c0), head_commit=c0, tags=["v1.0"])
+
+    graph = HistoryLoader(repo).load()
+
+    assert graph.nodes[c0].tags == ()
+    assert not any(call.args and call.args[0] == "tag" for call in repo.git.call_args_list)
+
+
+def test_repo_wide_tag_scan_can_be_enabled():
+    c0 = "a" * 40
+    repo = _mock_repo(_log_entry(c0), head_commit=c0, tags=["v1.0"])
+
+    graph = HistoryLoader(repo, include_repo_tags=True).load()
+
+    assert graph.nodes[c0].tags == ("v1.0",)
+
+
 def test_load_topo_rank_oldest_is_zero():
     c0, c1, c2 = "0" * 40, "1" * 40, "2" * 40
     log = _log_entry(c2, (c1,)) + _log_entry(c1, (c0,)) + _log_entry(c0)

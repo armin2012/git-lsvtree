@@ -1,8 +1,8 @@
 # git-lsvtree-ui Design Document
 
-**Version:** 1.2  
+**Version:** 1.3  
 **Date:** 2026-06-20  
-**Status:** Implemented (Phase 1–5 complete; Phase 6 dynamic layout in design)
+**Status:** Implemented (Phase 1–6 complete; Phase 7 merge-aware layout in design)
 
 ---
 
@@ -376,8 +376,8 @@ This mirrors ClearCase lsvtree behavior: the branch label appears at the point w
 #### Edge routing implications
 
 - **Fork (branch) edges**: with dynamic columns, the fork edge from the parent commit to the first commit of the child branch is always exactly 1 column wide (horizontal or 1-step diagonal). This eliminates the "stretched fork" problem.
-- **Merge edges**: similarly shortened, since the merge source and target are now horizontally close.
-- **Cross-branch interference**: a straight line between two nodes may still cross intermediate branch columns. This is acceptable for v2; curve routing (Bezier waypoints around intervening nodes) is deferred to v3.
+- **Merge edges**: interval packing shortens merge edges on average, but the column ORDER within each packing still affects how many merge edges cross each other. Column ordering optimization is addressed in §5.4.
+- **Cross-branch interference**: a straight line between two nodes may still cross intermediate branch columns if column order is not optimized. Curve routing (Bézier waypoints) is deferred.
 
 #### Implementation plan
 
@@ -393,7 +393,136 @@ Changes confined to `layout/tree_layout.py`:
 
 `LayoutGraph`, `LayoutNode`, `LayoutEdge`, `BranchHeader`, and all UI layers are **unchanged** — column numbers flow through the same pixel formula `x = left_margin + col * col_width`.
 
-### 5.4 Layout constants
+### 5.4 Column ordering — merge-aware crossing minimization (v3)
+
+Interval packing (§5.3) determines the **number** of columns and which branches may share a column, but does not constrain the **relative order** of branches within those columns. Two branches assigned to non-shared columns can still be placed in either relative position. The wrong ordering causes merge lines to cross.
+
+#### 5.4.1 Crossing definition
+
+Two merge edges M1 = (A → B) and M2 = (C → D) cross if and only if both conditions hold:
+
+```
+Row ranges overlap:
+    max(row_A, row_B) > min(row_C, row_D)
+    AND min(row_A, row_B) < max(row_C, row_D)
+
+Column ranges interleave (edges go in opposite horizontal directions):
+    min(col_A, col_B) < min(col_C, col_D) < max(col_A, col_B) < max(col_C, col_D)
+    OR the symmetric case
+```
+
+In a version tree where merge edges always run from a feature branch (higher column) toward main or another target (lower column), crossings occur when two merge edges "swap" their relative column order between source and target rows.
+
+#### 5.4.2 Algorithm
+
+Three phases, applied after interval packing produces the initial column assignment:
+
+---
+
+**Phase A — Merge topology analysis**
+
+Extract branch-level merge relationships from `DisplayGraph.edges`:
+
+```python
+merge_pairs: list[tuple[str, str]]   # (src_branch, dst_branch) for each merge edge
+merge_partners: dict[str, set[str]]  # branch → set of branches it merges with
+```
+
+Also compute for each merge edge its row range — the span from source node's row to target node's row.
+
+---
+
+**Phase B — Merge-cost column selection**
+
+Modify `_pack_columns` so that when multiple candidate columns satisfy the packing constraints, the one with the lowest **merge cost** is chosen rather than simply the lowest column index.
+
+For branch B being assigned to column `c`, with all previously placed merge partners P already at column `col(P)`:
+
+```
+merge_cost(B, c) = Σ  |c - col(P)| × overlap_weight(B, P)
+                  P ∈ merge_partners[B] ∩ placed
+
+overlap_weight(B, P) = length of row-range intersection of B and P
+                       (longer shared row range → more visual prominence)
+```
+
+**Selection rule**: among all candidate columns `c ≥ parent_col + 1` that satisfy the packing constraint, choose the `c` minimising `merge_cost(B, c)`.
+
+**Intuition**: branches that merge into each other are pulled toward adjacent columns, shortening merge lines and reducing the chance of crossing intermediate branches.
+
+---
+
+**Phase C — Local swap refinement**
+
+Phase B is greedy (placement order affects result). A post-hoc swap pass improves the global assignment:
+
+```
+repeat:
+    improved = False
+    for each pair of branches (A, B) where neither is an ancestor of the other:
+        if swap(col[A], col[B]) satisfies all constraints:
+            Δ = crossing_count_after - crossing_count_before
+            if Δ < 0:
+                apply swap
+                improved = True
+until not improved
+```
+
+**Constraint check for swap(A, B)**:
+
+1. Parent constraint: `col[parent(A)] < col[B]` and `col[parent(B)] < col[A]` (swapped positions must still be right of each branch's parent).
+2. Child constraint: all children of A must have columns > `col[B]`, and vice versa.
+3. Packing constraint: in column `col[B]`, no existing occupant has a row range overlapping A (with GAP=1), and symmetrically for column `col[A]` and B.
+
+**Crossing count** (used to evaluate Δ):
+
+Iterate all pairs of merge edges `(M1, M2)` and apply the crossing condition from §5.4.1. O(M²) per evaluation, where M = number of merge edges. For typical repos (M < 100) this is < 0.1 ms.
+
+---
+
+#### 5.4.3 Complexity
+
+| Phase | Cost | Typical runtime |
+|-------|------|-----------------|
+| A — topology | O(E) | negligible |
+| B — cost selection | O(B × M) per branch, O(B² × M) total | < 1 ms |
+| C — swap refinement | O(B² × M²) per pass, 2–3 passes typical | < 5 ms |
+
+B = branch count, M = merge edge count, E = total edge count. All within the layout thread; no UI impact.
+
+#### 5.4.4 Visual impact
+
+```
+Before (greedy column, 3 crossings):      After (merge-aware, 0 crossings):
+
+col:  0      1      2      3             col:  0      1      2      3
+      main   A      B      C                   main   C      B      A
+
+merge C→main ──────────────╮            merge C→main ──╮
+merge B→main ─────────╮   │            merge B→main ──────╮
+merge A→main ─────╮   │   │            merge A→main ──────────╮
+                  ↓   ↓   ↓                              ↓   ↓   ↓
+         3 crossings (lines tangle)          0 crossings (lines fan cleanly)
+```
+
+The algorithm re-orders A, B, C so that branches merging into main are sorted by merge row, ensuring merge lines fan out without crossing.
+
+#### 5.4.5 Implementation plan
+
+Changes confined to `layout/tree_layout.py` and its tests:
+
+| Step | Change |
+|------|--------|
+| New method `_merge_branch_pairs(display_graph)` | Returns `list[(src_branch, dst_branch)]` and `dict[branch, set[branch]]` |
+| Modify `_pack_columns` signature | Add `merge_partners` parameter |
+| Modify `_pack_columns` column selection | Replace "lowest available" with `argmin merge_cost` over candidates |
+| New method `_swap_optimize_columns(col, row_ranges, parent_map, merge_partners, merge_edges)` | Phase C local swap, returns updated `col` dict |
+| Update `layout()` | Call `_merge_branch_pairs()`, pass result into `_pack_columns()`, then call `_swap_optimize_columns()` |
+| New tests in `test_tree_layout.py` | `test_no_crossing_simple_fan`, `test_swap_reduces_crossings`, `test_crossing_count_formula` |
+
+`LayoutGraph`, `LayoutNode`, `LayoutEdge`, and all UI layers are **unchanged**. The algorithm outputs the same `dict[branch, int]` column map; only the values differ.
+
+### 5.5 Layout constants
 
 | Constant | Value | Purpose |
 |----------|-------|---------|
