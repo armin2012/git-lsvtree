@@ -364,33 +364,52 @@ Runs `DiffService.diff()` in a `QRunnable`. Emits `DiffLoaderSignals.loaded(Diff
 ### Layout
 
 ```
-┌─────────────────────────────────────────────────────┬──┐
-│  Old  aabbccdd1234  —  src/foo.py                   │  │
-│  New  eeff55667788  —  src/foo.py                   │  │
-├──────────────────────────┬──────────────────────────┤  │
-│ Left pane (old version)  │ Right pane (new version) │  │
-│                          │                          │  │
-│  line 1 (white)          │  line 1 (white)          │█ │ ← overview ruler
-│  line 2 [red bg]         │  line 2 [blue bg]        │  │
-│  line 3 (white)          │  line 3 (white)          │  │
-│  (empty)                 │  line 4 [blue bg]        │  │
-│  ...                     │  ...                     │  │
-│                          │                          │  │
-├──────────────────────────┴──────────────────────────┤  │
-│ [scrollbar]                                [scroll] │  │
-└─────────────────────────────────────────────────────┴──┘
+DiffPanel (QWidget)
+  QVBoxLayout
+  ├── header_row (QWidget, QHBoxLayout)          ← outside splitter
+  │     ├── old_label  "Old  aabb1234  —  foo.py"  (stretch=1)
+  │     └── new_label  "New  ccdd5678  —  foo.py"  (stretch=1)
+  └── content_row (QWidget, QHBoxLayout)
+        ├── splitter (QSplitter, Horizontal)
+        │     ├── left_pane  (QPlainTextEdit, old version)
+        │     └── right_pane (QPlainTextEdit, new version)
+        └── ruler (DiffOverviewRuler, 12 px fixed width)
 ```
+
+Visual layout:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ Old  aabbccdd1234  —  src/foo.py  │ New  eeff5678  …   │ ← header_row
+├──────────────────────────┬────────┴─────────────────────┼──┐
+│ Left pane (old version)  │ Right pane (new version)      │  │
+│                          │                               │  │
+│  line 1  (white)         │  line 1  (white)              │  │ ← ruler
+│  line 2  [red bg]        │  line 2  [blue bg]            │█ │   height =
+│  line 3  (white)         │  line 3  (white)              │  │   splitter
+│  (empty)                 │  line 4  [blue bg]            │  │   height
+│  …                       │  …                            │  │
+│                          │                               │  │
+├──────────────────────────┴───────────────────────────────┘  │
+│ [h-scrollbar]                                    [v-scroll]  │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**Why headers are outside the splitter**: placing labels inside each pane's container (as in v1) causes the ruler height to include the label height, so the ruler's proportional coordinate mapping is offset upward by the label height. Moving headers into a separate `header_row` above the splitter ensures `ruler.height() == splitter.height() == pane.height()`, so the coordinate mapping is exact.
 
 ### Components
 
 | Widget | Class | Role |
 |--------|-------|------|
 | Root | `DiffPanel(QWidget)` | Top-level container |
-| Header row | `QLabel` × 2 | Show old/new hash + rel_path |
-| Content area | `QSplitter(Horizontal)` | Resize left/right panes |
-| Left pane | `QPlainTextEdit` | Old file content, read-only |
-| Right pane | `QPlainTextEdit` | New file content, read-only |
-| Overview ruler | `DiffOverviewRuler(QWidget)` | Narrow strip, same width as scrollbar |
+| Header row | `QWidget` + `QHBoxLayout` | Separate row above splitter |
+| Old label | `QLabel` | Hash + path for old version |
+| New label | `QLabel` | Hash + path for new version |
+| Content row | `QWidget` + `QHBoxLayout` | Splitter + ruler side-by-side |
+| Splitter | `QSplitter(Horizontal)` | Resize left/right panes |
+| Left pane | `QPlainTextEdit` | Old file content, read-only, no-wrap |
+| Right pane | `QPlainTextEdit` | New file content, read-only, no-wrap |
+| Overview ruler | `DiffOverviewRuler(QWidget)` | 12 px strip; red marks + double-click nav |
 
 ### Color scheme
 
@@ -398,41 +417,46 @@ Runs `DiffService.diff()` in a `QRunnable`. Emits `DiffLoaderSignals.loaded(Diff
 |---------|-----------|------------|
 | Changed line | `#fee2e2` (red) | `#dbeafe` (blue) |
 | Unchanged line | `#ffffff` (white) | `#ffffff` (white) |
-| Empty padding line | no background | no background |
+| Empty padding line | system default | system default |
 
 ### Line alignment algorithm
 
 Uses `difflib.SequenceMatcher(autojunk=False)` on `old_content.splitlines()` vs `new_content.splitlines()`.
 
-For each opcode block:
+`_align_sides(old_lines, new_lines) → (left, right, diff_ranges)`:
 
 | Opcode | Left side | Right side |
 |--------|-----------|------------|
 | `equal` | line, white | line, white |
 | `replace` | old lines red; pad with empty if shorter | new lines blue; pad with empty if shorter |
-| `delete` | old lines red | empty lines, no color |
-| `insert` | empty lines, no color | new lines blue |
+| `delete` | old lines red | empty lines, default bg |
+| `insert` | empty lines, default bg | new lines blue |
 
-Padding ensures left and right always have the same total line count, which is required for synchronized scrolling to be meaningful.
+Padding ensures left and right always have the same total line count (required for synchronized scrolling). `diff_ranges` lists `(start_line, end_line)` for every non-equal block, passed to `DiffOverviewRuler.set_ranges()`.
 
 ### Synchronized scrolling
 
-Both panes connect their `verticalScrollBar().valueChanged` and `horizontalScrollBar().valueChanged` signals to a shared handler guarded by a `_syncing: bool` flag to prevent infinite feedback loops.
-
-Mouse-wheel events are handled by Qt at the viewport level; since both scroll bars are connected, wheel scrolling on either pane drives both simultaneously.
+Both panes connect their `verticalScrollBar().valueChanged` and `horizontalScrollBar().valueChanged` to shared handlers guarded by `_syncing: bool` to prevent feedback loops. Mouse-wheel events drive the scroll bar value, which triggers the handler automatically.
 
 ### Overview ruler (`DiffOverviewRuler`)
 
-A narrow `QWidget` (fixed width = scrollbar width, typically 12–15 px) placed to the right of the splitter.
+A narrow `QWidget` (12 px fixed width) placed in `content_row` alongside the splitter. Its height therefore exactly equals the pane height, with no offset from headers.
 
 **Rendering** (`paintEvent`):
 1. Fill background `#f8fafc`.
-2. For each diff block (position in `_diff_ranges: list[tuple[int, int]]`, in lines), map the line range `[start, end)` to vertical pixel range `[y1, y2]` proportional to the total line count and ruler height. Draw a filled `#ef4444` rectangle across the full width.
-3. The ruler does **not** scroll — it always shows the entire document. Its red marks are fixed relative to the document, giving a bird's-eye view.
+2. For each `(start, end)` in `_ranges`, compute pixel range:
+   - `y1 = int(start × h / total_lines)`
+   - `y2 = max(y1 + 2, int(end × h / total_lines))` (minimum 2 px height)
+3. Draw filled `#ef4444` rectangle `(1, y1, width-2, y2-y1)`.
+4. The ruler never scrolls — it always represents the full document.
 
-**Data source**: `DiffPanel` computes `_diff_ranges` (list of `(first_diff_line, last_diff_line)` tuples) when populating the panes and passes them to `DiffOverviewRuler.set_ranges(total_lines, ranges)`.
+**Data API**: `set_ranges(total_lines: int, ranges: list[tuple[int, int]])` — stores data and calls `update()`.
 
-**Viewport indicator** (optional, Phase 6): a translucent rectangle overlaid on the ruler showing the currently visible viewport range.
+**Double-click navigation** (`mouseDoubleClickEvent`):
+1. Compute `target_line = int(event.pos().y() / height() × total_lines)`.
+2. Find the nearest diff block: scan `_ranges` for a block containing `target_line`; if none, pick the block with the smallest distance to `target_line`.
+3. Emit `Signal jumpRequested(int)` with the block's `start_line`.
+4. `DiffPanel._jump_to_line(line)` slot: for each pane, create a `QTextCursor` on `document().findBlockByLineNumber(line)`, call `setTextCursor()` then `centerCursor()`, guarded by `_syncing` to avoid double-scroll.
 
 ---
 

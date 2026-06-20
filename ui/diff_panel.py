@@ -3,7 +3,7 @@ from __future__ import annotations
 import difflib
 import logging
 
-from PySide6.QtCore import QRect, QSize, Qt
+from PySide6.QtCore import QObject, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFontDatabase, QPainter, QTextBlockFormat, QTextCursor
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -89,6 +89,10 @@ def _make_pane(font) -> QPlainTextEdit:
     return pane
 
 
+class _RulerSignals(QObject):
+    jumpRequested = Signal(int)
+
+
 class DiffOverviewRuler(QWidget):
     _BG = QColor("#f8fafc")
     _MARK = QColor("#ef4444")
@@ -96,9 +100,12 @@ class DiffOverviewRuler(QWidget):
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
+        self._signals = _RulerSignals()
+        self.jumpRequested: Signal = self._signals.jumpRequested
         self._total_lines = 0
         self._ranges: list[tuple[int, int]] = []
         self.setFixedWidth(self._W)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def set_ranges(self, total_lines: int, ranges: list[tuple[int, int]]) -> None:
         self._total_lines = total_lines
@@ -120,6 +127,21 @@ class DiffOverviewRuler(QWidget):
             y2 = max(y1 + 2, int(end * h / self._total_lines))
             painter.fillRect(QRect(1, y1, w - 2, y2 - y1), self._MARK)
 
+    def mouseDoubleClickEvent(self, event) -> None:
+        if self._total_lines <= 0 or not self._ranges:
+            return
+        clicked_line = int(event.position().y() / self.height() * self._total_lines)
+        target = self._nearest_diff_start(clicked_line)
+        self._signals.jumpRequested.emit(target)
+
+    def _nearest_diff_start(self, line: int) -> int:
+        # prefer a range that contains the clicked line
+        for start, end in self._ranges:
+            if start <= line < end:
+                return start
+        # otherwise pick the range whose start is closest
+        return min(self._ranges, key=lambda r: abs(r[0] - line))[0]
+
 
 class DiffPanel(QWidget):
     def __init__(self):
@@ -128,14 +150,25 @@ class DiffPanel(QWidget):
         self._syncing = False
         font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
 
+        # ── header row (outside splitter so ruler height == pane height) ──
         self._old_label = QLabel("—")
         self._new_label = QLabel("—")
-        for lbl in (self._old_label, self._new_label):
-            lbl.setStyleSheet("padding: 2px 4px; background: #f1f5f9; font-weight: bold;")
+        _lbl_style = "padding: 2px 4px; background: #f1f5f9; font-weight: bold;"
+        self._old_label.setStyleSheet(_lbl_style)
+        self._new_label.setStyleSheet(_lbl_style)
 
+        header_row = QWidget()
+        hr = QHBoxLayout(header_row)
+        hr.setContentsMargins(0, 0, 0, 0)
+        hr.setSpacing(0)
+        hr.addWidget(self._old_label, stretch=1)
+        hr.addWidget(self._new_label, stretch=1)
+
+        # ── panes ──────────────────────────────────────────────────────────
         self._left = _make_pane(font)
         self._right = _make_pane(font)
         self._ruler = DiffOverviewRuler()
+        self._ruler.jumpRequested.connect(self._jump_to_line)
 
         self._left.verticalScrollBar().valueChanged.connect(self._sync_v_from_left)
         self._right.verticalScrollBar().valueChanged.connect(self._sync_v_from_right)
@@ -143,34 +176,22 @@ class DiffPanel(QWidget):
         self._right.horizontalScrollBar().valueChanged.connect(self._sync_h_from_right)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(self._left)
+        splitter.addWidget(self._right)
 
-        left_w = QWidget()
-        lv = QVBoxLayout(left_w)
-        lv.setContentsMargins(0, 0, 0, 0)
-        lv.setSpacing(0)
-        lv.addWidget(self._old_label)
-        lv.addWidget(self._left)
-
-        right_w = QWidget()
-        rv = QVBoxLayout(right_w)
-        rv.setContentsMargins(0, 0, 0, 0)
-        rv.setSpacing(0)
-        rv.addWidget(self._new_label)
-        rv.addWidget(self._right)
-
-        splitter.addWidget(left_w)
-        splitter.addWidget(right_w)
-
-        content = QWidget()
-        ch = QHBoxLayout(content)
-        ch.setContentsMargins(0, 0, 0, 0)
-        ch.setSpacing(0)
-        ch.addWidget(splitter)
-        ch.addWidget(self._ruler)
+        # ── content row: splitter | ruler (ruler.height == pane.height) ───
+        content_row = QWidget()
+        cr = QHBoxLayout(content_row)
+        cr.setContentsMargins(0, 0, 0, 0)
+        cr.setSpacing(0)
+        cr.addWidget(splitter)
+        cr.addWidget(self._ruler)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
-        root.addWidget(content)
+        root.setSpacing(0)
+        root.addWidget(header_row)
+        root.addWidget(content_row)
 
     # ── scroll sync ────────────────────────────────────────────────────────
 
@@ -200,6 +221,19 @@ class DiffPanel(QWidget):
             return
         self._syncing = True
         self._left.horizontalScrollBar().setValue(value)
+        self._syncing = False
+
+    # ── ruler jump ─────────────────────────────────────────────────────────
+
+    def _jump_to_line(self, line: int) -> None:
+        logger.debug("diff panel jump to line=%d", line)
+        self._syncing = True
+        for pane in (self._left, self._right):
+            block = pane.document().findBlockByLineNumber(line)
+            if block.isValid():
+                cursor = QTextCursor(block)
+                pane.setTextCursor(cursor)
+                pane.centerCursor()
         self._syncing = False
 
     # ── public API ─────────────────────────────────────────────────────────
