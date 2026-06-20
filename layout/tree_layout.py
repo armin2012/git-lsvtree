@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Mapping
@@ -36,6 +37,7 @@ class LayoutNode:
     radius: float
     label: str
     source_hashes: tuple[str, ...]
+    tags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -104,6 +106,7 @@ class TreeLayout:
                 radius=self.settings.node_radius,
                 label=node.label,
                 source_hashes=node.source_hashes,
+                tags=node.tags,
             )
 
         headers = {
@@ -123,18 +126,29 @@ class TreeLayout:
         }
 
         edges: list[LayoutEdge] = []
+        r = self.settings.node_radius
         for edge in display_graph.edges:
             if edge.src not in nodes or edge.dst not in nodes:
                 logger.debug("skip layout edge missing endpoint src=%s dst=%s", edge.src, edge.dst)
                 continue
+            sc = nodes[edge.src].center
+            dc = nodes[edge.dst].center
+            dx, dy = dc.x - sc.x, dc.y - sc.y
+            length = math.hypot(dx, dy)
+            if length > r * 2:
+                ux, uy = dx / length, dy / length
+                start = Point(sc.x + r * ux, sc.y + r * uy)
+                end = Point(dc.x - r * ux, dc.y - r * uy)
+            else:
+                start, end = sc, dc
             edges.append(
                 LayoutEdge(
                     src=edge.src,
                     dst=edge.dst,
                     kind=edge.kind,
                     label=edge.label,
-                    start=nodes[edge.src].center,
-                    end=nodes[edge.dst].center,
+                    start=start,
+                    end=end,
                 )
             )
 

@@ -99,4 +99,7 @@ class GraphScene(QGraphicsScene):
         show = zoom >= _LOD_LABEL_THRESHOLD
         for item in self.item_by_id.values():
             item.label_item.setVisible(show)
+            tag_item = getattr(item, "tag_label_item", None)
+            if tag_item is not None:
+                tag_item.setVisible(show)
         logger.debug("lod updated zoom=%s show_labels=%s", zoom, show)

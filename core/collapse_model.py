@@ -76,6 +76,7 @@ class CollapseModel:
                 topo_rank=node.topo_rank,
                 label=str(node.per_branch_index),
                 source_hashes=(commit,),
+                tags=node.tags,
             )
 
         display_edges: list[DisplayEdge] = []
@@ -135,6 +136,7 @@ class CollapseModel:
                 topo_rank=node.topo_rank,
                 label=str(node.per_branch_index),
                 source_hashes=(commit,),
+                tags=node.tags,
             )
             for commit, node in graph.nodes.items()
         }

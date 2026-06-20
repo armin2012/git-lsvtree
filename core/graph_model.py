@@ -82,6 +82,7 @@ class DisplayNode:
     topo_rank: int
     label: str
     source_hashes: tuple[str, ...]
+    tags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

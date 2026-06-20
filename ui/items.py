@@ -31,10 +31,19 @@ class VersionNodeItem(QGraphicsEllipseItem):
         self._selected_state = False
         self.setBrush(QBrush(_COLOR_NODE_FILL))
         self.setPen(QPen(_COLOR_NODE_BORDER, 1.4))
-        self.setToolTip(node.id[:12])
+        tip = node.id[:12]
+        if node.tags:
+            tip += "\n" + "  ".join(node.tags)
+        self.setToolTip(tip)
         self.label_item = QGraphicsSimpleTextItem(node.label, self)
         self.label_item.setBrush(QBrush(QColor("#111827")))
         self.label_item.setPos(node.center.x + r + 4, node.center.y - r)
+        self.tag_label_item: QGraphicsSimpleTextItem | None = None
+        if node.tags:
+            tag_text = "  ".join(f"[{t}]" for t in node.tags[:3])
+            self.tag_label_item = QGraphicsSimpleTextItem(tag_text, self)
+            self.tag_label_item.setBrush(QBrush(QColor("#92400e")))
+            self.tag_label_item.setPos(node.center.x + r + 4, node.center.y + 2)
 
     def set_selected_state(self, on: bool) -> None:
         self._selected_state = on
@@ -105,21 +114,23 @@ class EdgeItem(QGraphicsPathItem):
         super().__init__()
         self.setData(0, "edge")
         self.setData(1, f"{edge.src}->{edge.dst}")
-        self.setZValue(-1)
         self.setToolTip(edge.label or edge.kind)
 
         if edge.kind == "merge":
             color = QColor("#dc2626")
             line_width = 2.0
             dash = True
+            self.setZValue(1.0)   # above nodes so merge lines are always visible
         elif edge.kind == "branch":
             color = QColor("#1d4ed8")
             line_width = 1.8
             dash = False
+            self.setZValue(-0.5)  # behind nodes
         else:
             color = QColor("#374151")
             line_width = 1.8
             dash = False
+            self.setZValue(-1.0)  # furthest behind
 
         sx, sy = edge.start.x, edge.start.y
         ex, ey = edge.end.x, edge.end.y
