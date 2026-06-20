@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPlainTextEdit,
+    QSizePolicy,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -158,6 +159,7 @@ class DiffPanel(QWidget):
         self._new_label.setStyleSheet(_lbl_style)
 
         header_row = QWidget()
+        header_row.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         hr = QHBoxLayout(header_row)
         hr.setContentsMargins(0, 0, 0, 0)
         hr.setSpacing(0)
@@ -190,8 +192,8 @@ class DiffPanel(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-        root.addWidget(header_row)
-        root.addWidget(content_row)
+        root.addWidget(header_row, stretch=0)
+        root.addWidget(content_row, stretch=1)
 
     # ── scroll sync ────────────────────────────────────────────────────────
 
