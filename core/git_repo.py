@@ -1,12 +1,27 @@
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 
 logger = logging.getLogger(__name__)
+
+# Suppress the black console window that flashes on each git call on Windows.
+_POPEN_FLAGS: dict = (
+    {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
+)
+
+# Force UTF-8 from git regardless of the system locale.
+_GIT_ENV: dict[str, str] = {
+    **os.environ,
+    "GIT_TERMINAL_PROMPT": "0",
+    "LANG": "en_US.UTF-8",
+    "LC_ALL": "en_US.UTF-8",
+}
 
 
 @dataclass
@@ -43,7 +58,11 @@ class GitRepo:
             ["git", "rev-parse", "--show-toplevel"],
             cwd=start,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
+            env=_GIT_ENV,
+            **_POPEN_FLAGS,
         )
         if result.returncode != 0:
             raise GitCommandError(
@@ -65,7 +84,11 @@ class GitRepo:
             list(command),
             cwd=self.repo_root,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
+            env=_GIT_ENV,
+            **_POPEN_FLAGS,
         )
 
     def current_branch(self) -> str:
