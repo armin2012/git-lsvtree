@@ -46,6 +46,10 @@ class DiffLoadRequest:
     file_path: Path
     old_hash: str
     new_hash: str
+    old_branch: str = ""
+    old_branch_index: int = -1
+    new_branch: str = ""
+    new_branch_index: int = -1
 
 
 class GraphLoaderSignals(QObject):
@@ -121,7 +125,19 @@ class DiffLoaderWorker(QRunnable):
         )
         try:
             repo = GitRepo.from_file(self.request.file_path)
-            result: DiffResult = DiffService(repo).diff(self.request.old_hash, self.request.new_hash)
+            base: DiffResult = DiffService(repo).diff(self.request.old_hash, self.request.new_hash)
+            result = DiffResult(
+                old_hash=base.old_hash,
+                new_hash=base.new_hash,
+                rel_path=base.rel_path,
+                text=base.text,
+                old_content=base.old_content,
+                new_content=base.new_content,
+                old_branch=self.request.old_branch,
+                old_branch_index=self.request.old_branch_index,
+                new_branch=self.request.new_branch,
+                new_branch_index=self.request.new_branch_index,
+            )
         except Exception as exc:
             logger.exception(
                 "diff worker failed old=%s new=%s", self.request.old_hash[:12], self.request.new_hash[:12]

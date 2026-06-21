@@ -240,10 +240,19 @@ class DiffPanel(QWidget):
 
     # ── public API ─────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _branch_suffix(branch: str, index: int) -> str:
+        if not branch:
+            return ""
+        n = index if index >= 0 else "?"
+        return f"  @  {branch}/{n}"
+
     def show_diff(self, result: DiffResult) -> None:
         logger.info("diff panel show old=%s new=%s", result.old_hash[:12], result.new_hash[:12])
-        self._old_label.setText(f"  Old  {result.old_hash[:12]}  —  {result.rel_path}")
-        self._new_label.setText(f"  New  {result.new_hash[:12]}  —  {result.rel_path}")
+        old_suffix = self._branch_suffix(result.old_branch, result.old_branch_index)
+        new_suffix = self._branch_suffix(result.new_branch, result.new_branch_index)
+        self._old_label.setText(f"  Old  {result.old_hash[:12]}  —  {result.rel_path}{old_suffix}")
+        self._new_label.setText(f"  New  {result.new_hash[:12]}  —  {result.rel_path}{new_suffix}")
         old_lines = result.old_content.splitlines()
         new_lines = result.new_content.splitlines()
         left_lines, right_lines, diff_ranges = _align_sides(old_lines, new_lines)

@@ -296,8 +296,19 @@ class MainWindow(QMainWindow):
         # Ensure old→new order by topo_rank (lower rank = older)
         if nodes[v0].topo_rank > nodes[v1].topo_rank:
             v0, v1 = v1, v0
+        graph_nodes = self.current_graph.nodes if self.current_graph else {}
+        n0 = graph_nodes.get(v0)
+        n1 = graph_nodes.get(v1)
         self.diff_panel.show_loading()
-        worker = DiffLoaderWorker(DiffLoadRequest(file_path=self.current_file, old_hash=v0, new_hash=v1))
+        worker = DiffLoaderWorker(DiffLoadRequest(
+            file_path=self.current_file,
+            old_hash=v0,
+            new_hash=v1,
+            old_branch=n0.reconstructed_branch if n0 else "",
+            old_branch_index=n0.per_branch_index if n0 else -1,
+            new_branch=n1.reconstructed_branch if n1 else "",
+            new_branch_index=n1.per_branch_index if n1 else -1,
+        ))
         worker.signals.loaded.connect(self._on_diff_loaded)
         worker.signals.failed.connect(self._on_diff_failed)
         self.thread_pool.start(worker)

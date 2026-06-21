@@ -17,6 +17,10 @@ class DiffResult:
     text: str
     old_content: str = ""
     new_content: str = ""
+    old_branch: str = ""
+    old_branch_index: int = -1
+    new_branch: str = ""
+    new_branch_index: int = -1
 
 
 class DiffService:

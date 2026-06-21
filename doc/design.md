@@ -236,6 +236,10 @@ class DiffResult:
     text: str          # unified diff text (kept for reference)
     old_content: str   # full file content at old_hash via git show
     new_content: str   # full file content at new_hash via git show
+    old_branch: str = ""   # reconstructed branch name for old version
+    old_branch_index: int = -1  # 0-based position in branch (oldest=0)
+    new_branch: str = ""   # reconstructed branch name for new version
+    new_branch_index: int = -1  # 0-based position in branch (oldest=0)
 
 class DiffService:
     def diff(self, old_hash: str, new_hash: str) -> DiffResult:
@@ -247,6 +251,8 @@ class DiffService:
 `old_content` and `new_content` provide the full file text that the `DiffPanel` uses for side-by-side alignment. The `text` (unified diff) is retained as a fallback and for logging.
 
 The caller is responsible for ordering `old_hash` / `new_hash` by `topo_rank` (lower = older) before calling `diff()`. `MainWindow.run_diff()` performs this sort automatically.
+
+`old_branch` / `new_branch` and their corresponding `*_branch_index` are populated by `MainWindow.run_diff()` from the loaded graph model (`VersionNode.reconstructed_branch` and `VersionNode.per_branch_index`). `per_branch_index` is 0-based (0 = oldest commit on that branch); the UI displays it as 1-based (`per_branch_index + 1`) to match ClearCase convention.
 
 ---
 
@@ -614,8 +620,8 @@ Runs `DiffService.diff()` in a `QRunnable`. Emits `DiffLoaderSignals.loaded(Diff
 DiffPanel (QWidget)
   QVBoxLayout
   ├── header_row (QWidget, QHBoxLayout)          ← outside splitter
-  │     ├── old_label  "Old  aabb1234  —  foo.py"  (stretch=1)
-  │     └── new_label  "New  ccdd5678  —  foo.py"  (stretch=1)
+  │     ├── old_label  "Old  aabb1234  —  foo.py  @ main/3"  (stretch=1)
+  │     └── new_label  "New  ccdd5678  —  foo.py  @ feature-x/1"  (stretch=1)
   └── content_row (QWidget, QHBoxLayout)
         ├── splitter (QSplitter, Horizontal)
         │     ├── left_pane  (QPlainTextEdit, old version)
