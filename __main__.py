@@ -19,7 +19,11 @@ def main() -> None:
     window.show()
     if len(sys.argv) > 1:
         from pathlib import Path
-        window.load_file(Path(sys.argv[1]))
+        arg = Path(sys.argv[1])
+        if arg.is_dir():
+            window._load_project(arg)
+        else:
+            window.load_file(arg)
     sys.exit(app.exec())
 
 if __name__ == "__main__":
