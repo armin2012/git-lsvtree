@@ -493,10 +493,10 @@ class MainWindow(QMainWindow):
                 self.detail_panel.setPlainText(f"Collapsed run: {node.id}\nVersions: {len(node.source_hashes)}")
         else:
             self.current_run = None
-            if modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier):
-                self.selected_versions = [*self.selected_versions, node.id][-2:]
+            if node.id in self.selected_versions:
+                self.selected_versions = [v for v in self.selected_versions if v != node.id]
             else:
-                self.selected_versions = [node.id]
+                self.selected_versions = [*self.selected_versions, node.id][-2:]
             if self.current_graph:
                 self.detail_panel.show_version(node, self.current_graph)
             else:

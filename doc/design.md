@@ -1168,23 +1168,30 @@ A narrow `QWidget` (12 px fixed width) placed in `content_row` alongside the spl
 
 ### 8.1 Version selection
 
+Selection uses a **FIFO queue of at most 2 nodes**, toggled with plain single-click. No modifier key is required.
+
 ```
 NoSelection
-  left-click version node  →  OneSelected(v1)
-  left-click run node      →  RunFocused(run)
+  click version node A     →  OneSelected(A)
+  click run node           →  RunFocused(run)
 
-OneSelected(v1)
-  left-click version node  →  OneSelected(v2)       # replaces selection
-  Ctrl/Shift+click version →  TwoSelected(v1, v2)   # appends, keeps last 2
-  left-click blank         →  NoSelection
+OneSelected(A)
+  click same node A        →  NoSelection           # toggle off
+  click different node B   →  TwoSelected(A, B)     # Diff enabled
+  click run node           →  RunFocused(run)
 
-TwoSelected(v1, v2)
-  left-click version node  →  OneSelected(v3)
-  Ctrl/Shift+click version →  TwoSelected(v2, v3)
-  Diff action              →  run DiffLoaderWorker(v_older, v_newer)
+TwoSelected(A, B)   [A was selected first]
+  click same node A        →  OneSelected(B)        # toggle A off, B remains
+  click same node B        →  OneSelected(A)        # toggle B off, A remains
+  click different node C   →  TwoSelected(B, C)     # evict oldest (A), enqueue C
+  Diff action              →  run DiffLoaderWorker(older, newer)
 ```
 
-Diff action is only enabled when exactly 2 concrete version nodes are selected. Collapsed run nodes do not participate in diff selection.
+**Rules:**
+- Clicking an **unselected** node: append to queue; if queue was full (2), drop the oldest entry first.
+- Clicking an **already-selected** node: remove it from the queue regardless of position.
+- Run nodes reset the selection queue to empty and do not enter it.
+- Diff action is only enabled when exactly 2 concrete version nodes are selected.
 
 ### 8.1b Edge selection
 
