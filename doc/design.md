@@ -811,30 +811,45 @@ QMainWindow
   └── bottom dock: DiffPanel
 ```
 
-**Collapsed state** (default, no project open):
+The central area is a three-panel `QSplitter(Horizontal)`:
 
 ```
-┌──┬──────────────────────────────────────┬──────────┐
-│▶ │  version tree canvas / empty state   │  Detail  │
-└──┴──────────────────────────────────────┴──────────┘
-│                    Diff (bottom dock)               │
-└────────────────────────────────────────────────────┘
+┌──────────────┬──────────────────────────┬──────────────┐
+│ CollapsibleNav│  QStackedWidget          │CollapsibleDetail│
+│  (left panel) │  (version tree / empty) │ (right panel) │
+└──────────────┴──────────────────────────┴──────────────┘
+│                    Diff (bottom dock)                   │
+└─────────────────────────────────────────────────────────┘
 ```
 
-**Expanded state** (after project loaded):
+**Default state** (no project open):
 
 ```
-┌─────────────┬────────────────────────────┬──────────┐
-│ ProjectNav  │  version tree canvas       │  Detail  │
-│ (≈200 px)  ◀│                            │          │
-└─────────────┴────────────────────────────┴──────────┘
-│                      Diff (bottom dock)             │
-└────────────────────────────────────────────────────┘
+┌──┬──────────────────────────────────┬──────────────────┬──┐
+│▶ │  version tree / empty state      │  Detail Panel    │▶ │
+└──┴──────────────────────────────────┴──────────────────┴──┘
+ nav                                   detail expanded   detail btn
+ (18px)                                (≈200px)          (18px)
 ```
 
-The ◀ toggle button on the right edge of the navigator collapses it to 18 px (showing only the ▶ strip). Clicking the strip or the button re-expands to the last-used width.
+**Project open + nav expanded**:
 
-The navigator is never fully hidden (removed from layout). It always occupies at least 18 px. This preserves the toggle affordance without requiring a menu action to re-show it.
+```
+┌───────────┬──┬──────────────────────┬──────────────────┬──┐
+│ ProjectNav│◀ │  version tree canvas │  Detail Panel    │▶ │
+│  (≈200px) │  │                      │  (≈200px)        │  │
+└───────────┴──┴──────────────────────┴──────────────────┴──┘
+```
+
+**Both panels collapsed**:
+
+```
+┌──┬────────────────────────────────────────────────────┬──┐
+│▶ │  version tree canvas (maximum width)               │◀ │
+└──┴────────────────────────────────────────────────────┴──┘
+```
+
+All panels use `CollapsiblePanel` with an 18 px toggle strip. Neither panel is ever fully removed from the layout — they always hold at least 18 px so the toggle affordance is always reachable. `QDockWidget` is no longer used for navigator or detail; only the Diff panel remains as a bottom dock.
 
 The project navigator is opened only in project mode. In single-file mode it remains collapsed unless a project has already been opened in the session.
 
@@ -896,7 +911,45 @@ For routed edges, `EdgeItem` consumes `LayoutEdge.route_kind` and `LayoutEdge.co
 
 `_pending_run` solves the expand-then-collapse UX issue: `expand_run()` sets `_pending_run = run_id` before triggering async reload; `set_loaded_layout()` restores `current_run` from it, so "Collapse Run" remains enabled immediately after expansion completes.
 
-### 6.5 CollapsibleNavigator
+### 6.5 CollapsiblePanel and CollapsibleNavigator
+
+`CollapsiblePanel(QWidget)` is a generic collapsible sidebar base class. It wraps any `QWidget` with an 18 px toggle strip on one edge.
+
+```python
+class CollapsiblePanel(QWidget):
+    collapseToggled = Signal(bool)  # True = collapsed, False = expanded
+
+    def __init__(self, widget: QWidget, side: Literal["left", "right"] = "left"):
+        ...
+    def expand(self) -> None: ...
+    def collapse(self) -> None: ...
+    def toggle(self) -> None: ...
+    @property
+    def is_collapsed(self) -> bool: ...
+```
+
+**`side="left"`** (navigator): strip on right edge, ▶ = collapsed, ◀ = expanded.  
+**`side="right"`** (detail): strip on left edge, ◀ = collapsed, ▶ = expanded.
+
+`CollapsibleNavigator(CollapsiblePanel)` extends the base and adds:
+- `navigator: ProjectNavigator` attribute
+- `fileSelected: Signal(Path)` forwarded from `ProjectNavigator`
+- `set_project_tree(tree)` helper
+
+The central `QSplitter` holds three widgets in order:
+```
+index 0: CollapsibleNavigator  (side="left",  default collapsed)
+index 1: QStackedWidget        (stretch=1, takes all remaining space)
+index 2: CollapsiblePanel      (side="right", wraps DetailPanel, default expanded)
+```
+
+**Width management (MainWindow):**
+
+`_nav_expanded_width` and `_detail_expanded_width` (both default 200 px) store the last-used expanded widths. `_on_nav_collapse_toggled` and `_on_detail_collapse_toggled` call `QSplitter.setSizes([n, center, d])` keeping the opposite panel's width unchanged. `_on_splitter_moved` updates the stored widths when the user drags a handle while a panel is expanded.
+
+**View menu toggles:**
+- `View → Project Navigator` (checkable) — synced to `CollapsibleNavigator.collapseToggled`
+- `View → Detail Panel` (checkable) — synced to `CollapsiblePanel.collapseToggled` for the detail panel
 
 `CollapsibleNavigator(QWidget)` wraps `ProjectNavigator` inside a resizable left sidebar. It is the left child of the central `QSplitter`.
 
