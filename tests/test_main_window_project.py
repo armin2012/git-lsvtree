@@ -105,6 +105,22 @@ def test_main_window_project_load_failure_keeps_current_graph(qapp, tmp_path):
     assert window.current_layout is prev_layout
 
 
+def test_main_window_detail_panel_starts_expanded(qapp):
+    window = MainWindow()
+    assert not window._collapsible_detail.is_collapsed
+
+
+def test_main_window_detail_panel_collapse_toggle(qapp):
+    window = MainWindow()
+    assert not window._collapsible_detail.is_collapsed
+
+    window._collapsible_detail.collapse()
+    assert window._collapsible_detail.is_collapsed
+
+    window._collapsible_detail.expand()
+    assert not window._collapsible_detail.is_collapsed
+
+
 def test_main_window_collapse_toggle_preserves_project_tree(qapp, tmp_path):
     window = MainWindow()
     tree = _make_tree(tmp_path)

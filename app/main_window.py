@@ -30,7 +30,7 @@ from git_lsvtree_ui.core.diff_service import DiffResult
 from git_lsvtree_ui.core.graph_model import GraphModel
 from git_lsvtree_ui.core.project_tree import ProjectTree
 from git_lsvtree_ui.layout.tree_layout import LayoutGraph
-from git_lsvtree_ui.ui.collapsible_navigator import BTN_WIDTH as _NAV_BTN_WIDTH, CollapsibleNavigator
+from git_lsvtree_ui.ui.collapsible_navigator import BTN_WIDTH as _NAV_BTN_WIDTH, CollapsibleNavigator, CollapsiblePanel
 from git_lsvtree_ui.ui.detail_panel import DetailPanel
 from git_lsvtree_ui.ui.diff_panel import DiffPanel
 from git_lsvtree_ui.ui.graph_view import GraphView
@@ -60,6 +60,7 @@ class MainWindow(QMainWindow):
         self.current_project_root: Path | None = None
         self.current_project_tree: ProjectTree | None = None
         self._nav_expanded_width: int = _DEFAULT_NAV_WIDTH
+        self._detail_expanded_width: int = _DEFAULT_NAV_WIDTH
 
         self.graph_view = GraphView()
         self.graph_view.scene().nodeClickedWithModifiers.connect(self._on_node_clicked_with_modifiers)
@@ -72,22 +73,28 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.empty_label)
         self.stack.addWidget(self.graph_view)
 
+        self.detail_panel = DetailPanel()
+
         self._collapsible_nav = CollapsibleNavigator()
         self._collapsible_nav.fileSelected.connect(self.load_file)
         self._collapsible_nav.collapseToggled.connect(self._on_nav_collapse_toggled)
 
+        self._collapsible_detail = CollapsiblePanel(self.detail_panel, side="right")
+        self._collapsible_detail.collapseToggled.connect(self._on_detail_collapse_toggled)
+
         self._nav_splitter = QSplitter(Qt.Orientation.Horizontal)
         self._nav_splitter.addWidget(self._collapsible_nav)
         self._nav_splitter.addWidget(self.stack)
+        self._nav_splitter.addWidget(self._collapsible_detail)
         self._nav_splitter.setCollapsible(0, False)
         self._nav_splitter.setCollapsible(1, False)
+        self._nav_splitter.setCollapsible(2, False)
         self._nav_splitter.setStretchFactor(0, 0)
         self._nav_splitter.setStretchFactor(1, 1)
-        self._nav_splitter.setSizes([_NAV_BTN_WIDTH, 1000])
+        self._nav_splitter.setStretchFactor(2, 0)
         self._nav_splitter.splitterMoved.connect(self._on_splitter_moved)
         self.setCentralWidget(self._nav_splitter)
 
-        self.detail_panel = DetailPanel()
         self.diff_panel = DiffPanel()
         self.status_bar = GitLsvtreeStatusBar()
         self.setStatusBar(self.status_bar)
@@ -97,6 +104,7 @@ class MainWindow(QMainWindow):
         self._create_toolbar()
         self._create_docks()
         self.set_empty_state()
+        self._collapsible_detail.expand()
         logger.debug("main window initialized")
 
     # ── action / menu / toolbar / dock construction ────────────────────────
@@ -110,6 +118,12 @@ class MainWindow(QMainWindow):
         self.toggle_navigator_action.setChecked(False)
         self._collapsible_nav.collapseToggled.connect(
             lambda collapsed: self.toggle_navigator_action.setChecked(not collapsed)
+        )
+        self.toggle_detail_action = self._make_action("Detail Panel", self._collapsible_detail.toggle)
+        self.toggle_detail_action.setCheckable(True)
+        self.toggle_detail_action.setChecked(True)
+        self._collapsible_detail.collapseToggled.connect(
+            lambda collapsed: self.toggle_detail_action.setChecked(not collapsed)
         )
         self.reload_action = self._make_action("Reload", self.reload_current_file, "F5")
         self.full_action = self._make_action("Full", lambda: self.reload_current_file(mode="full"))
@@ -159,6 +173,7 @@ class MainWindow(QMainWindow):
             view_menu.addAction(action)
         view_menu.addSeparator()
         view_menu.addAction(self.toggle_navigator_action)
+        view_menu.addAction(self.toggle_detail_action)
 
         self.menuBar().addMenu("Tools")
         self.menuBar().addMenu("Help")
@@ -197,12 +212,6 @@ class MainWindow(QMainWindow):
     def _create_docks(self) -> None:
         logger.debug("creating dock widgets")
         _no_float = QDockWidget.DockWidgetFeature.DockWidgetClosable | QDockWidget.DockWidgetFeature.DockWidgetMovable
-
-        detail_dock = QDockWidget("Details", self)
-        detail_dock.setObjectName("detailDock")
-        detail_dock.setFeatures(_no_float)
-        detail_dock.setWidget(self.detail_panel)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, detail_dock)
 
         diff_dock = QDockWidget("Diff", self)
         diff_dock.setObjectName("diffDock")
@@ -299,21 +308,41 @@ class MainWindow(QMainWindow):
         logger.warning("project load failed message=%s", message)
 
     def _on_nav_collapse_toggled(self, collapsed: bool) -> None:
-        total = self._nav_splitter.width()
+        sizes = self._nav_splitter.sizes()
+        total = sum(sizes)
+        if total == 0:
+            return
+        d = sizes[2]
         if collapsed:
-            w = self._nav_splitter.sizes()[0]
+            w = sizes[0]
             if w > _NAV_BTN_WIDTH:
                 self._nav_expanded_width = w
-            self._nav_splitter.setSizes([_NAV_BTN_WIDTH, total - _NAV_BTN_WIDTH])
+            self._nav_splitter.setSizes([_NAV_BTN_WIDTH, total - _NAV_BTN_WIDTH - d, d])
         else:
             w = self._nav_expanded_width
-            self._nav_splitter.setSizes([w, max(0, total - w)])
+            self._nav_splitter.setSizes([w, max(0, total - w - d), d])
+
+    def _on_detail_collapse_toggled(self, collapsed: bool) -> None:
+        sizes = self._nav_splitter.sizes()
+        total = sum(sizes)
+        if total == 0:
+            return
+        n = sizes[0]
+        if collapsed:
+            w = sizes[2]
+            if w > _NAV_BTN_WIDTH:
+                self._detail_expanded_width = w
+            self._nav_splitter.setSizes([n, total - n - _NAV_BTN_WIDTH, _NAV_BTN_WIDTH])
+        else:
+            w = self._detail_expanded_width
+            self._nav_splitter.setSizes([n, max(0, total - n - w), w])
 
     def _on_splitter_moved(self, _pos: int, _index: int) -> None:
-        if not self._collapsible_nav.is_collapsed:
-            w = self._nav_splitter.sizes()[0]
-            if w > _NAV_BTN_WIDTH:
-                self._nav_expanded_width = w
+        sizes = self._nav_splitter.sizes()
+        if not self._collapsible_nav.is_collapsed and sizes[0] > _NAV_BTN_WIDTH:
+            self._nav_expanded_width = sizes[0]
+        if not self._collapsible_detail.is_collapsed and sizes[2] > _NAV_BTN_WIDTH:
+            self._detail_expanded_width = sizes[2]
 
     def load_file(self, file_path: Path, mode: str = "key") -> None:
         logger.info("main window load file requested file=%s mode=%s", file_path, mode)
