@@ -7,3 +7,7 @@ build/
 .venv/
 *.log
 test/git-src/
+# Only design.md and screenshot.png are tracked in doc/
+doc/*
+!doc/design.md
+!doc/screenshot.png
