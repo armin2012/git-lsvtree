@@ -1,8 +1,8 @@
 # git-lsvtree-ui Design Document
 
-**Version:** 1.5  
+**Version:** 1.6  
 **Date:** 2026-06-21  
-**Status:** Implemented through Phase 9 edge routing refinement
+**Status:** Design updated for Phase 10 project directory navigation
 
 ---
 
@@ -24,13 +24,14 @@ The static SVG approach is suitable for archiving and overall layout inspection,
 8. Status bar showing file, mode, version count, branch count, zoom, warnings.
 9. Click any rendered edge to highlight that edge and show both endpoint versions inside the version tree area; selecting another edge replaces the previous edge info.
 10. Route overlapping merge edges as separated curves where needed, and avoid drawing edges through unrelated version-node circles whenever practical.
+11. Open a whole Git project directory and browse its first-level directory tree in a dockable, hideable project navigator. Selecting a tracked file from the navigator loads that file's version tree in the main canvas.
 
 ### Out of scope (v1)
 
 - Write operations (checkout, label, merge).
 - True per-file ClearCase branch semantics (Git does not record them).
 - Web or browser frontend.
-- Multi-file simultaneous comparison.
+- Multi-file simultaneous comparison. Project navigation selects one file at a time; the version tree canvas still renders a single file history.
 
 ---
 
@@ -54,6 +55,7 @@ The strict layer rule: **core ← layout ← ui ← app**. No layer may import f
 ```
 core/
   git_repo.py        GitRepo dataclass — wraps subprocess git calls
+  project_tree.py    Project directory scanner and tracked-file tree model
   history_loader.py  Parses `git log --follow --all` into a raw GraphModel
   graph_model.py     Frozen dataclasses: VersionNode, Edge, GraphModel,
                        DisplayNode, DisplayEdge, DisplayGraph
@@ -72,13 +74,15 @@ ui/
                        VersionNodeItem, CollapsedRunItem, EdgeItem, BranchHeaderItem
   graph_scene.py     QGraphicsScene: hit-testing, selection state, LOD, highlight
   graph_view.py      QGraphicsView: zoom, middle-button pan, wheel scroll
+  project_navigator.py  Dockable project directory tree with expand/collapse and file selection
   detail_panel.py    QTextEdit: commit metadata on node click
   diff_panel.py      QWidget: side-by-side diff view with overview ruler
   status_bar.py      QStatusBar: file info, mode, zoom, warnings
 
 app/
   graph_loader.py    QRunnable workers: GraphLoaderWorker, DiffLoaderWorker
-                       Dataclasses: GraphLoadRequest, GraphLoadResult, DiffLoadRequest
+                       Dataclasses: GraphLoadRequest, GraphLoadResult, DiffLoadRequest,
+                       ProjectLoadRequest, ProjectLoadResult
   main_window.py     QMainWindow: state machine, action wiring, signal routing
   __main__.py        Entry point — QApplication + optional CLI file argument
 ```
@@ -86,7 +90,9 @@ app/
 ### 2.3 Data flow
 
 ```
-File path
+Project path / File path
+  ├─► ProjectTreeLoader.load(project_root)  →  ProjectTree  (right dock navigator)
+  │     └─► user selects tracked file
   └─► GitRepo.from_file()
         │  (resolves repo root, computes rel_path)
         ▼
@@ -104,6 +110,8 @@ File path
 ```
 
 All git I/O and graph computation runs in **QThreadPool workers**. The main thread only receives completed `GraphLoadResult` / `DiffResult` objects via Qt signals, so the UI stays responsive.
+
+Project directory scanning also runs in a worker. The main thread only receives a compact project tree model and renders it in the project navigator dock.
 
 ---
 
@@ -127,6 +135,47 @@ class GitRepo:
 ```
 
 All git commands receive `cwd=repo_root`. File paths passed to git use the posix-formatted relative path from repo root.
+
+### 3.1b ProjectTree
+
+Project mode opens a Git repository root or any directory inside a Git repository. The project tree model is a lightweight file/navigation model; it does not load file histories until the user selects a concrete file.
+
+```python
+@dataclass(frozen=True)
+class ProjectTreeNode:
+    name: str
+    rel_path: str
+    kind: Literal["directory", "file"]
+    children: tuple["ProjectTreeNode", ...] = ()
+    tracked: bool = False
+
+@dataclass(frozen=True)
+class ProjectTree:
+    repo_root: Path
+    root: ProjectTreeNode
+    tracked_file_count: int
+```
+
+Loading rules:
+
+1. Resolve the project root using Git, not by trusting the selected directory:
+
+   ```bash
+   git -C <selected-dir> rev-parse --show-toplevel
+   ```
+
+2. List tracked files with:
+
+   ```bash
+   git -C <repo-root> ls-files -z
+   ```
+
+3. Build a directory tree from tracked file paths only. Ignored/untracked files are not shown in Phase 10.
+4. The first render shows only the project root and first-level directory/file nodes. Child directories are lazy-expanded when the user clicks `+`.
+5. Directory nodes show `+` when collapsed and `-` when expanded. File nodes have no expander.
+6. Selecting a file emits the absolute file path and reuses the existing single-file graph loading pipeline.
+
+The project tree is independent of `GraphModel`; it is navigation state, not version-history state.
 
 ### 3.2 HistoryLoader
 
@@ -744,6 +793,25 @@ Phase 9 must ensure that separated curves have separate geometry so the clicked/
 
 ## 6. UI Layer
 
+### 6.0 Main Window Layout
+
+MainWindow uses a central version-tree canvas plus dock widgets:
+
+```
+QMainWindow
+  ├── toolbar
+  ├── central widget: version-tree stack
+  │     ├── empty state
+  │     └── GraphView
+  ├── right dock: ProjectNavigatorDock
+  ├── right dock: Details
+  └── bottom dock: DiffPanel
+```
+
+`ProjectNavigatorDock` is dockable, closable, and floatable. It can be hidden to avoid long-term occupation of the version tree display area. The default placement is the right side because the version tree grows horizontally by branch columns, and the navigator should not consume the left-side origin used by branch headers and row labels.
+
+The project navigator is opened only in project mode. In single-file mode it remains hidden unless a project has already been opened in the session.
+
 ### 6.1 GraphScene
 
 `GraphScene` (subclass of `QGraphicsScene`) owns the item dictionary `item_by_id: dict[str, VersionNodeItem | CollapsedRunItem]` and provides:
@@ -787,7 +855,10 @@ For routed edges, `EdgeItem` consumes `LayoutEdge.route_kind` and `LayoutEdge.co
 
 | Field | Type | Purpose |
 |-------|------|---------|
+| `current_project_root` | `Path \| None` | Currently opened project repository root |
 | `current_file` | `Path \| None` | Currently opened file |
+| `current_project_tree` | `ProjectTree \| None` | Cached tracked-file directory tree for the navigator |
+| `project_navigator_visible` | `bool` | Whether the project navigator dock is visible |
 | `current_mode` | `str` | `"key"` or `"full"` |
 | `collapse_enabled` | `bool` | Whether runs are collapsed |
 | `expanded_runs` | `frozenset[str]` | Run IDs that have been individually expanded |
@@ -799,9 +870,78 @@ For routed edges, `EdgeItem` consumes `LayoutEdge.route_kind` and `LayoutEdge.co
 
 `_pending_run` solves the expand-then-collapse UX issue: `expand_run()` sets `_pending_run = run_id` before triggering async reload; `set_loaded_layout()` restores `current_run` from it, so "Collapse Run" remains enabled immediately after expansion completes.
 
+### 6.5 ProjectNavigatorDock
+
+`ProjectNavigatorDock` is a `QDockWidget` containing a project tree widget. It is right-docked by default and can be:
+
+- closed/hidden using the dock close button;
+- shown again from a View menu action;
+- floated as a separate window;
+- resized without forcing the version tree canvas to re-layout.
+
+Visual behavior:
+
+- directory collapsed: `+ dirname`
+- directory expanded: `- dirname`
+- file: `  filename`
+- current selected file: highlighted row
+- optional count badge: number of tracked files under a directory
+
+Interaction:
+
+1. `Open Project...` opens a directory chooser.
+2. Project tree worker scans tracked files and populates first-level nodes.
+3. Clicking `+` expands that directory node in the navigator only.
+4. Clicking `-` collapses that directory node in the navigator only.
+5. Clicking a file triggers `MainWindow.load_file(file_path)` and updates the main version tree.
+6. Hiding the navigator must not clear `current_project_tree` or `current_file`; showing it again restores the same expanded/collapsed state.
+
+Navigator expansion is UI-only state:
+
+```python
+expanded_project_dirs: set[str]  # rel_path directory keys
+selected_project_file: str | None
+```
+
+The version tree canvas remains single-file. It is not used to render the directory tree.
+
 ---
 
 ## 7. Background Workers
+
+### ProjectTreeWorker
+
+Runs project directory scanning in a `QRunnable`.
+
+```python
+@dataclass(frozen=True)
+class ProjectLoadRequest:
+    project_path: Path
+
+@dataclass(frozen=True)
+class ProjectLoadResult:
+    repo_root: Path
+    tree: ProjectTree
+```
+
+Worker pipeline:
+
+```
+ProjectLoadRequest(project_path)
+  └─► GitRepo / project resolver
+        └─► git rev-parse --show-toplevel
+              └─► git ls-files -z
+                    └─► ProjectTree
+                          └─► ProjectNavigatorDock.set_project_tree()
+```
+
+Failure cases:
+
+- selected directory is not inside a Git repository;
+- `git ls-files` fails;
+- repository has no tracked files.
+
+Failures emit `signals.failed(str)` and are displayed in the empty-state label/status bar without modifying the currently loaded file graph.
 
 ### GraphLoaderWorker
 
@@ -952,6 +1092,30 @@ EdgeSelected(e1)
 
 Edge selection clears version-node diff selection so the canvas has one visible focus mode at a time. Edge endpoint information is displayed in the version tree area rather than the right-side detail dock, because it explains the clicked line directly in the graph context.
 
+### 8.1c Project navigation
+
+```
+NoProject
+  Open Project directory    →  LoadingProject
+
+LoadingProject
+  ProjectTree loaded        →  ProjectLoaded(root)
+  ProjectTree failed        →  NoProject + error message
+
+ProjectLoaded(root)
+  click + directory         →  DirectoryExpanded(dir)
+  click - directory         →  DirectoryCollapsed(dir)
+  click file                →  LoadingFile(file)
+  hide navigator dock       →  ProjectLoaded(root), navigator hidden
+  show navigator dock       →  ProjectLoaded(root), navigator restored
+
+LoadingFile(file)
+  GraphLoadResult loaded    →  FileGraphVisible(file)
+  GraphLoadResult failed    →  ProjectLoaded(root) + error message
+```
+
+Project state and file graph state are deliberately separate. A failed file graph load must not clear the project navigator, and hiding the navigator must not unload the current file graph.
+
 ### 8.2 Collapse / expand
 
 ```
@@ -1054,6 +1218,49 @@ Goal: make overlapping merge lines distinguishable and reduce edge paths that pa
 - Keep the same offset magnitude so the branch layout width is unchanged.
 - Add tests for mirror-side crossing reduction and obstacle-preserving side selection.
 
+### Phase 10 — Project Directory Navigator
+
+Goal: allow opening a whole Git project, browsing its tracked files through a dockable directory navigator, and loading a selected file into the existing version tree canvas.
+
+#### Phase 10.1 — Project tree core model
+- Add `ProjectTreeNode` and `ProjectTree` dataclasses in `core/project_tree.py`.
+- Implement tracked-file tree construction from `git ls-files -z`.
+- Unit tests:
+  - flat files become first-level file nodes;
+  - nested paths become directory nodes;
+  - only tracked paths are present;
+  - deterministic sorting: directories first, then files, case-insensitive by display name.
+
+#### Phase 10.2 — Project loading worker
+- Add `ProjectLoadRequest`, `ProjectLoadResult`, `ProjectLoaderWorker`.
+- Resolve repository root using `git rev-parse --show-toplevel`.
+- Load tree in a background worker.
+- Worker failure must not clear the current graph.
+- Tests with mocked Git repo / subprocess wrapper.
+
+#### Phase 10.3 — ProjectNavigatorDock UI
+- Add `ui/project_navigator.py`.
+- Render first-level directories/files initially.
+- Use explicit `+` / `-` indicators for directory expand/collapse.
+- Emit `fileSelected(Path)` when a file node is clicked.
+- Preserve `expanded_project_dirs` and selected file state when the dock is hidden and shown again.
+- Tests for tree population, expand/collapse state, and file selection signal.
+
+#### Phase 10.4 — MainWindow integration
+- Add `Open Project...` action.
+- Add View menu action to show/hide Project Navigator.
+- On project load success, show navigator dock and keep graph canvas unchanged until a file is selected.
+- On file selection, call existing `load_file()` path and reuse current graph pipeline.
+- Status bar should show project root and selected file when project mode is active.
+- Tests for project load success, file selection triggering `GraphLoaderWorker`, and navigator visibility toggling.
+
+#### Phase 10.5 — UX validation
+- Opening a project does not immediately consume the version tree canvas with a directory view.
+- Hiding the navigator frees horizontal space for the version tree.
+- Floating the navigator does not reload the current graph.
+- Selecting another file clears version-node/edge selections from the old file graph.
+- Large repositories remain responsive because project scanning runs in a worker and file histories load on demand.
+
 ---
 
 ## 10. Error Handling
@@ -1083,3 +1290,8 @@ Non-fatal situations (partial key selection, very large graphs) produce a warnin
 | Status bar | `GitLsvtreeStatusBar.set_loaded()` — file, mode, counts, zoom, warning |
 | Search / locate | Toolbar search box → `GraphScene.highlight_node()` |
 | Export | `MainWindow.export_png()` → `QPixmap` |
+| Open project directory | `Open Project...` → `ProjectLoaderWorker` → `ProjectNavigatorDock.set_project_tree()` |
+| Browse project first-level directory | `ProjectNavigatorDock` from `ProjectTree` |
+| Expand/collapse directory with +/- | `ProjectNavigatorDock.expanded_project_dirs` |
+| Select file from project navigator | `ProjectNavigatorDock.fileSelected(Path)` → existing `MainWindow.load_file()` |
+| Hide / float navigator | `QDockWidget` features on `ProjectNavigatorDock` |

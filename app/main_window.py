@@ -21,13 +21,18 @@ from git_lsvtree_ui.app.graph_loader import (
     GraphLoadRequest,
     GraphLoadResult,
     GraphLoaderWorker,
+    ProjectLoadRequest,
+    ProjectLoadResult,
+    ProjectLoaderWorker,
 )
 from git_lsvtree_ui.core.diff_service import DiffResult
 from git_lsvtree_ui.core.graph_model import GraphModel
+from git_lsvtree_ui.core.project_tree import ProjectTree
 from git_lsvtree_ui.layout.tree_layout import LayoutGraph
 from git_lsvtree_ui.ui.detail_panel import DetailPanel
 from git_lsvtree_ui.ui.diff_panel import DiffPanel
 from git_lsvtree_ui.ui.graph_view import GraphView
+from git_lsvtree_ui.ui.project_navigator import ProjectNavigator
 from git_lsvtree_ui.ui.status_bar import GitLsvtreeStatusBar
 
 
@@ -50,6 +55,8 @@ class MainWindow(QMainWindow):
         self._pending_run: str | None = None
         self.current_layout: LayoutGraph | None = None
         self.current_graph: GraphModel | None = None
+        self.current_project_root: Path | None = None
+        self.current_project_tree: ProjectTree | None = None
 
         self.graph_view = GraphView()
         self.graph_view.scene().nodeClickedWithModifiers.connect(self._on_node_clicked_with_modifiers)
@@ -79,7 +86,11 @@ class MainWindow(QMainWindow):
 
     def _create_actions(self) -> None:
         logger.debug("creating main window actions")
-        self.open_action = self._make_action("Open", self.open_file_dialog, "Ctrl+O")
+        self.open_action = self._make_action("Open File…", self.open_file_dialog, "Ctrl+O")
+        self.open_project_action = self._make_action("Open Project…", self.open_project_dialog, "Ctrl+Shift+O")
+        self.toggle_navigator_action = self._make_action("Project Navigator", self._toggle_navigator_dock)
+        self.toggle_navigator_action.setCheckable(True)
+        self.toggle_navigator_action.setChecked(False)
         self.reload_action = self._make_action("Reload", self.reload_current_file, "F5")
         self.full_action = self._make_action("Full", lambda: self.reload_current_file(mode="full"))
         self.key_action = self._make_action("Key", lambda: self.reload_current_file(mode="key"))
@@ -107,6 +118,7 @@ class MainWindow(QMainWindow):
         logger.debug("creating main menus")
         file_menu = self.menuBar().addMenu("File")
         file_menu.addAction(self.open_action)
+        file_menu.addAction(self.open_project_action)
         file_menu.addAction(self.reload_action)
         file_menu.addSeparator()
         file_menu.addAction(self.export_action)
@@ -125,6 +137,8 @@ class MainWindow(QMainWindow):
             self.reset_zoom_action,
         ):
             view_menu.addAction(action)
+        view_menu.addSeparator()
+        view_menu.addAction(self.toggle_navigator_action)
 
         self.menuBar().addMenu("Tools")
         self.menuBar().addMenu("Help")
@@ -174,6 +188,20 @@ class MainWindow(QMainWindow):
         diff_dock.setFeatures(_no_float)
         diff_dock.setWidget(self.diff_panel)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, diff_dock)
+
+        self.project_navigator = ProjectNavigator()
+        self.project_navigator.fileSelected.connect(self.load_file)
+        self.navigator_dock = QDockWidget("Project", self)
+        self.navigator_dock.setObjectName("navigatorDock")
+        self.navigator_dock.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetClosable
+            | QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+        )
+        self.navigator_dock.setWidget(self.project_navigator)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.navigator_dock)
+        self.navigator_dock.hide()
+        self.navigator_dock.visibilityChanged.connect(self._on_navigator_visibility_changed)
         logger.debug("created dock widgets")
 
     # ── state setters ──────────────────────────────────────────────────────
@@ -232,6 +260,44 @@ class MainWindow(QMainWindow):
         logger.debug("file dialog selected path=%s", path)
         if path:
             self.load_file(Path(path))
+
+    def open_project_dialog(self) -> None:
+        logger.debug("opening project dialog")
+        path = QFileDialog.getExistingDirectory(self, "Open Project")
+        logger.debug("project dialog selected path=%s", path)
+        if path:
+            self._load_project(Path(path))
+
+    def _load_project(self, project_path: Path) -> None:
+        logger.info("load project requested path=%s", project_path)
+        worker = ProjectLoaderWorker(ProjectLoadRequest(project_path=project_path))
+        worker.signals.loaded.connect(self._on_project_loaded)
+        worker.signals.failed.connect(self._on_project_failed)
+        self.thread_pool.start(worker)
+
+    def _on_project_loaded(self, result: ProjectLoadResult) -> None:
+        logger.info(
+            "project loaded repo_root=%s tracked_files=%d",
+            result.repo_root,
+            result.tree.tracked_file_count,
+        )
+        self.current_project_root = result.repo_root
+        self.current_project_tree = result.tree
+        self.project_navigator.set_project_tree(result.tree)
+        self.navigator_dock.show()
+        self.toggle_navigator_action.setChecked(True)
+
+    def _on_project_failed(self, message: str) -> None:
+        logger.warning("project load failed message=%s", message)
+
+    def _toggle_navigator_dock(self) -> None:
+        if self.toggle_navigator_action.isChecked():
+            self.navigator_dock.show()
+        else:
+            self.navigator_dock.hide()
+
+    def _on_navigator_visibility_changed(self, visible: bool) -> None:
+        self.toggle_navigator_action.setChecked(visible)
 
     def load_file(self, file_path: Path, mode: str = "key") -> None:
         logger.info("main window load file requested file=%s mode=%s", file_path, mode)

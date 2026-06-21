@@ -14,6 +14,7 @@ Interactive single-file version tree browser for Git, inspired by ClearCase's `l
 
 ## Features
 
+- **Project navigator** — open an entire Git repository; a dockable right-side panel lists all tracked files in a directory tree with `+` / `-` expand/collapse; selecting a file loads its version tree; the panel can be hidden, floated, or redocked
 - **Dynamic branch layout** — branches are placed next to their fork point (interval packing), with merge-aware column ordering to reduce crossings without widening the graph unnecessarily
 - **Branch tree view** — ClearCase-style column layout; one column per concurrent branch, shared by non-overlapping branches
 - **Merge-aware edge routing** — overlapping merge edges are separated with curved routes, mirror-side routing reduces avoidable crossings, and edge paths avoid version-node circles where practical
@@ -41,6 +42,7 @@ git_lsvtree_ui/
 │   ├── key_selector.py     # Selects skeleton + tag + sampled nodes for Key mode
 │   ├── collapse_model.py   # Folds linear chains → DisplayGraph with run nodes
 │   ├── diff_service.py     # Fetches full file content at each version → DiffResult
+│   ├── project_tree.py     # Project tree model and builder (ProjectTree, ProjectTreeNode, ProjectTreeBuilder)
 │   └── graph_model.py      # Frozen dataclasses: VersionNode, GraphModel, DisplayNode, DisplayGraph
 │
 ├── layout/                 # Coordinate computation, no Qt dependency
@@ -54,10 +56,11 @@ git_lsvtree_ui/
 │   ├── graph_view.py       # QGraphicsView: Ctrl+wheel zoom, middle-button pan, wheel scroll
 │   ├── detail_panel.py     # QTextEdit: shows commit metadata on node click
 │   ├── diff_panel.py       # Side-by-side diff with scroll sync and overview ruler
+│   ├── project_navigator.py # Dockable project tree: tracked files, expand/collapse, file selection
 │   └── status_bar.py       # QStatusBar: file info, mode, zoom, warnings
 │
 ├── app/                    # Application layer
-│   ├── graph_loader.py     # QRunnable workers: GraphLoaderWorker, DiffLoaderWorker
+│   ├── graph_loader.py     # QRunnable workers: GraphLoaderWorker, DiffLoaderWorker, ProjectLoaderWorker
 │   ├── main_window.py      # QMainWindow: wires all components, manages state
 │   └── __main__.py         # Entry point
 │
@@ -68,6 +71,10 @@ git_lsvtree_ui/
 ### Data flow
 
 ```
+Project path (optional)
+  └─► ProjectLoaderWorker        →  ProjectTree  (right dock navigator)
+        └─► user selects a file
+
 File path
   └─► GitRepo.from_file()
         └─► HistoryLoader.load()            →  GraphModel  (raw commits + edges)
@@ -107,19 +114,33 @@ pip install -e .
 ## Usage
 
 ```bash
-# Open the UI with an empty window (use Ctrl+O to pick a file)
+# Open the UI with an empty window (use Ctrl+O to pick a file, Ctrl+Shift+O to open a project)
 python -m git_lsvtree_ui
 
 # Open directly on a file
 python -m git_lsvtree_ui path/to/some/tracked_file.py
 ```
 
+### Opening a project
+
+Use **File → Open Project…** (Ctrl+Shift+O) to open an entire Git repository:
+
+1. A directory chooser appears — select any directory inside a Git repo.
+2. The **Project** navigator dock appears on the right, listing all tracked files.
+3. Directories show `+` (collapsed) or `-` (expanded). Click to toggle.
+4. Click any file to load its version tree in the main canvas.
+5. Hide the navigator with **View → Project Navigator**, or drag it to float.
+6. Re-show it from the View menu; expansion state and file selection are preserved.
+
+> **Single-file mode** (File → Open File… / Ctrl+O) still works exactly as before.
+
 ### Keyboard shortcuts
 
-| Shortcut | Action |
-|----------|--------|
-| Ctrl+O   | Open file |
-| F5       | Reload |
+| Shortcut       | Action |
+|----------------|--------|
+| Ctrl+O         | Open file |
+| Ctrl+Shift+O   | Open project |
+| F5             | Reload |
 | Ctrl+D   | Diff selected versions |
 | Ctrl+E   | Export PNG |
 | Ctrl++   | Zoom in |
@@ -164,12 +185,14 @@ pip install pytest
 pytest tests/ -v
 ```
 
-The test suite (126 cases) covers core, layout, and Qt scene behavior without requiring a visible display.
+The test suite (145 cases) covers core, layout, project tree, project navigator, and Qt scene behavior without requiring a visible display.
 
 ---
 
 ## Current release notes
 
+- **Project navigator** — open a full Git repository; browse tracked files in a dockable, floatable right-side panel; select a file to load its version tree.
+- Diff header now shows `@ branch/N` for both sides (e.g. `@ main/3`), matching the version number displayed in the tree.
 - Merge-aware branch column ordering and local swap refinement.
 - Routed merge edges with curve separation, adaptive stroke width, node-obstacle avoidance, and mirror-side crossing reduction.
 - Important Git tags are visible in normal UI loads.

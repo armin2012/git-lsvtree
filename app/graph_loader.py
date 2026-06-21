@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import logging
+import os
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -14,10 +17,33 @@ from git_lsvtree_ui.core.git_repo import GitRepo
 from git_lsvtree_ui.core.graph_model import GraphModel
 from git_lsvtree_ui.core.history_loader import HistoryLoader
 from git_lsvtree_ui.core.key_selector import KeySelector
+from git_lsvtree_ui.core.project_tree import ProjectTree, ProjectTreeBuilder
 from git_lsvtree_ui.layout.tree_layout import LayoutGraph, TreeLayout
 
 
 logger = logging.getLogger(__name__)
+
+_POPEN_FLAGS: dict = (
+    {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
+)
+
+_GIT_ENV: dict[str, str] = {
+    **os.environ,
+    "GIT_TERMINAL_PROMPT": "0",
+    "LANG": "en_US.UTF-8",
+    "LC_ALL": "en_US.UTF-8",
+}
+
+
+@dataclass(frozen=True)
+class ProjectLoadRequest:
+    project_path: Path
+
+
+@dataclass(frozen=True)
+class ProjectLoadResult:
+    repo_root: Path
+    tree: ProjectTree
 
 
 @dataclass(frozen=True)
@@ -55,6 +81,78 @@ class DiffLoadRequest:
 class GraphLoaderSignals(QObject):
     loaded = Signal(object)
     failed = Signal(str)
+
+
+class ProjectLoaderSignals(QObject):
+    loaded = Signal(object)
+    failed = Signal(str)
+
+
+class ProjectLoaderWorker(QRunnable):
+    def __init__(self, request: ProjectLoadRequest):
+        super().__init__()
+        logger.debug("init project loader worker request=%s", request)
+        self.request = request
+        self.signals = ProjectLoaderSignals()
+
+    @Slot()
+    def run(self) -> None:
+        logger.info("loading project in worker path=%s", self.request.project_path)
+        try:
+            repo_root = self._resolve_repo_root(self.request.project_path)
+            tracked_paths = self._tracked_paths(repo_root)
+            tree = ProjectTreeBuilder().build(repo_root=repo_root, tracked_paths=tracked_paths)
+            result = ProjectLoadResult(repo_root=repo_root, tree=tree)
+        except Exception as exc:
+            logger.exception("project worker failed path=%s", self.request.project_path)
+            self.signals.failed.emit(str(exc))
+            return
+
+        logger.info(
+            "project worker loaded repo_root=%s tracked_files=%d",
+            result.repo_root,
+            result.tree.tracked_file_count,
+        )
+        self.signals.loaded.emit(result)
+
+    @classmethod
+    def _resolve_repo_root(cls, project_path: Path) -> Path:
+        path = project_path.resolve()
+        result = cls._run_git("-C", str(path), "rev-parse", "--show-toplevel")
+        if result.returncode != 0:
+            message = result.stderr.strip() or "failed to resolve Git repository root"
+            logger.warning("project root resolve failed path=%s stderr=%s", path, message)
+            raise ValueError(message)
+        repo_root = Path(result.stdout.strip()).resolve()
+        if not str(repo_root):
+            raise ValueError("failed to resolve Git repository root")
+        logger.debug("resolved project repo root path=%s repo_root=%s", path, repo_root)
+        return repo_root
+
+    @classmethod
+    def _tracked_paths(cls, repo_root: Path) -> list[str]:
+        result = cls._run_git("-C", str(repo_root), "ls-files", "-z")
+        if result.returncode != 0:
+            message = result.stderr.strip() or "failed to list tracked files"
+            logger.warning("project tracked file list failed repo_root=%s stderr=%s", repo_root, message)
+            raise ValueError(message)
+        paths = [path for path in result.stdout.split("\x00") if path]
+        logger.debug("loaded tracked project paths repo_root=%s count=%d", repo_root, len(paths))
+        return paths
+
+    @staticmethod
+    def _run_git(*args: str) -> subprocess.CompletedProcess[str]:
+        command = ["git", *args]
+        logger.debug("running project git command command=%s", command)
+        return subprocess.run(
+            command,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            env=_GIT_ENV,
+            **_POPEN_FLAGS,
+        )
 
 
 class GraphLoaderWorker(QRunnable):
