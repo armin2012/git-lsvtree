@@ -1,9 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
-import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -22,17 +19,6 @@ from git_lsvtree_ui.layout.tree_layout import LayoutGraph, TreeLayout
 
 
 logger = logging.getLogger(__name__)
-
-_POPEN_FLAGS: dict = (
-    {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
-)
-
-_GIT_ENV: dict[str, str] = {
-    **os.environ,
-    "GIT_TERMINAL_PROMPT": "0",
-    "LANG": "en_US.UTF-8",
-    "LC_ALL": "en_US.UTF-8",
-}
 
 
 @dataclass(frozen=True)
@@ -115,44 +101,28 @@ class ProjectLoaderWorker(QRunnable):
         )
         self.signals.loaded.emit(result)
 
-    @classmethod
-    def _resolve_repo_root(cls, project_path: Path) -> Path:
+    @staticmethod
+    def _resolve_repo_root(project_path: Path) -> Path:
         path = project_path.resolve()
-        result = cls._run_git("-C", str(path), "rev-parse", "--show-toplevel")
+        result = GitRepo.run_git_at(path, "rev-parse", "--show-toplevel")
         if result.returncode != 0:
             message = result.stderr.strip() or "failed to resolve Git repository root"
             logger.warning("project root resolve failed path=%s stderr=%s", path, message)
             raise ValueError(message)
         repo_root = Path(result.stdout.strip()).resolve()
-        if not str(repo_root):
-            raise ValueError("failed to resolve Git repository root")
         logger.debug("resolved project repo root path=%s repo_root=%s", path, repo_root)
         return repo_root
 
-    @classmethod
-    def _tracked_paths(cls, repo_root: Path) -> list[str]:
-        result = cls._run_git("-C", str(repo_root), "ls-files", "-z")
+    @staticmethod
+    def _tracked_paths(repo_root: Path) -> list[str]:
+        result = GitRepo.run_git_at(repo_root, "ls-files", "-z")
         if result.returncode != 0:
             message = result.stderr.strip() or "failed to list tracked files"
             logger.warning("project tracked file list failed repo_root=%s stderr=%s", repo_root, message)
             raise ValueError(message)
-        paths = [path for path in result.stdout.split("\x00") if path]
+        paths = [p for p in result.stdout.split("\x00") if p]
         logger.debug("loaded tracked project paths repo_root=%s count=%d", repo_root, len(paths))
         return paths
-
-    @staticmethod
-    def _run_git(*args: str) -> subprocess.CompletedProcess[str]:
-        command = ["git", *args]
-        logger.debug("running project git command command=%s", command)
-        return subprocess.run(
-            command,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            capture_output=True,
-            env=_GIT_ENV,
-            **_POPEN_FLAGS,
-        )
 
 
 class GraphLoaderWorker(QRunnable):

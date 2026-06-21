@@ -316,10 +316,10 @@ class MainWindow(QMainWindow):
         worker.signals.failed.connect(self._on_graph_failed)
         self.thread_pool.start(worker)
 
-    def reload_current_file(self, mode: str = "key") -> None:
+    def reload_current_file(self, mode: str = "") -> None:
         logger.debug("reload requested current_file=%s mode=%s", self.current_file, mode)
         if self.current_file:
-            self.load_file(self.current_file, mode=mode)
+            self.load_file(self.current_file, mode=mode or self.current_mode)
 
     # ── collapse / expand ──────────────────────────────────────────────────
 

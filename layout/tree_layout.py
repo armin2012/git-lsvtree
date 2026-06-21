@@ -573,13 +573,13 @@ class TreeLayout:
 
         optimized = dict(col)
         branches = list(optimized)
+        current_crossings = self._crossing_count(merge_edges, optimized)
         for pass_index in range(max_passes):
             changed = False
-            before_pass = self._crossing_count(merge_edges, optimized)
             logger.debug(
                 "swap optimize pass start pass=%d crossings=%d",
                 pass_index + 1,
-                before_pass,
+                current_crossings,
             )
             for left_index, left in enumerate(branches):
                 for right in branches[left_index + 1:]:
@@ -594,25 +594,23 @@ class TreeLayout:
                         logger.debug("reject swap interval packing left=%s right=%s", left, right)
                         continue
 
-                    before = self._crossing_count(merge_edges, optimized)
                     after = self._crossing_count(merge_edges, swapped)
-                    if after < before:
+                    if after < current_crossings:
                         logger.debug(
                             "accept swap left=%s right=%s before=%d after=%d",
                             left,
                             right,
-                            before,
+                            current_crossings,
                             after,
                         )
                         optimized = swapped
+                        current_crossings = after
                         changed = True
 
-            after_pass = self._crossing_count(merge_edges, optimized)
             logger.debug(
-                "swap optimize pass complete pass=%d before=%d after=%d changed=%s",
+                "swap optimize pass complete pass=%d crossings=%d changed=%s",
                 pass_index + 1,
-                before_pass,
-                after_pass,
+                current_crossings,
                 changed,
             )
             if not changed:

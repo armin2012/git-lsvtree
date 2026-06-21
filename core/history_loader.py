@@ -10,8 +10,8 @@ from .graph_model import Edge, GraphModel, MergeParent, VersionNode
 
 logger = logging.getLogger(__name__)
 
-US = "\x01"
-GS = "\x02"
+RS = "\x00"   # record separator — NUL is safe; git rejects NUL bytes in commit messages
+GS = "\x02"   # field separator
 
 
 def parse_merge_source(subject: str) -> str:
@@ -50,7 +50,7 @@ class HistoryLoader:
 
     def load(self) -> GraphModel:
         all_args = ("--all",) if self.include_all else ()
-        fmt = "%x01%H %P%x02%D%x02%an%x02%ae%x02%at%x02%ct%x02%s%x02%cn%x02%ce%x02%b"
+        fmt = "%x00%H %P%x02%D%x02%an%x02%ae%x02%at%x02%ct%x02%s%x02%cn%x02%ce%x02%b"
         logger.info(
             "loading file history rel_path=%s include_all=%s",
             self.repo.rel_path,
@@ -67,7 +67,7 @@ class HistoryLoader:
             "--",
             self.repo.rel_path,
         )
-        records = [record for record in raw.split(US) if record.strip()]
+        records = [record for record in raw.split(RS) if record.strip()]
         if not records:
             logger.warning("no git history for rel_path=%s", self.repo.rel_path)
             return GraphModel({}, tuple(), tuple(), tuple(), {})
@@ -78,7 +78,7 @@ class HistoryLoader:
         subjects: dict[str, str] = {}
 
         for rank, record in enumerate(records):
-            fields = (record.split(GS) + ["", "", "", "", "", "", "", "", ""])[:10]
+            fields = (record.split(GS, 9) + [""] * 10)[:10]
             (
                 hash_and_parents,
                 decorations,

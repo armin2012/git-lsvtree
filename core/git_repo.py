@@ -91,12 +91,32 @@ class GitRepo:
             **_POPEN_FLAGS,
         )
 
+    @staticmethod
+    def run_git_at(path: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        """Run a git command rooted at `path` without a GitRepo instance."""
+        command = ["git", *args]
+        logger.debug("run_git_at path=%s command=%s", path, command)
+        return subprocess.run(
+            command,
+            cwd=path,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            env=_GIT_ENV,
+            **_POPEN_FLAGS,
+        )
+
     def current_branch(self) -> str:
-        result = self.git("rev-parse", "--abbrev-ref", "HEAD")
+        result = self.git("symbolic-ref", "--short", "HEAD")
         name = result.stdout.strip()
-        if result.returncode != 0 or name in ("HEAD", ""):
-            return "main"
-        return name
+        if result.returncode == 0 and name:
+            return name
+        # detached HEAD — consult git config, then fall back to "main"
+        cfg = self.git("config", "--get", "init.defaultBranch")
+        if cfg.returncode == 0 and cfg.stdout.strip():
+            return cfg.stdout.strip()
+        return "main"
 
     def git_checked(self, *args: str) -> str:
         result = self.git(*args)

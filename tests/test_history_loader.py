@@ -11,7 +11,7 @@ from git_lsvtree_ui.core.history_loader import (
     parse_tags,
 )
 
-US = "\x01"
+RS = "\x00"   # must match history_loader.RS
 GS = "\x02"
 
 
@@ -30,7 +30,7 @@ def _log_entry(
 ) -> str:
     parent_str = " ".join(parents)
     return (
-        f"{US}{hash_} {parent_str}"
+        f"{RS}{hash_} {parent_str}"
         f"{GS}{decorations}{GS}{author}{GS}{email}"
         f"{GS}{atime}{GS}{ctime}{GS}{subject}"
         f"{GS}{committer}{GS}{committer_email}{GS}{description}"

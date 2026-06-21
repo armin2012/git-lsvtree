@@ -5,8 +5,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from git_lsvtree_ui.app import graph_loader as graph_loader_module
 from git_lsvtree_ui.app.graph_loader import ProjectLoaderWorker, ProjectLoadRequest
+from git_lsvtree_ui.core import git_repo as git_repo_module
 
 
 def _completed(returncode: int = 0, stdout: str = "", stderr: str = "") -> MagicMock:
@@ -20,17 +20,17 @@ def _completed(returncode: int = 0, stdout: str = "", stderr: str = "") -> Magic
 def test_project_loader_resolves_repo_root_and_builds_tree(monkeypatch, tmp_path: Path):
     project_path = tmp_path / "repo" / "subdir"
     repo_root = tmp_path / "repo"
-    calls = []
+    calls: list[tuple[Path, tuple]] = []
 
-    def fake_run(args, **kwargs):
-        calls.append((args, kwargs))
-        if args == ["git", "-C", str(project_path), "rev-parse", "--show-toplevel"]:
+    def fake_run_git_at(path: Path, *args: str):
+        calls.append((path, args))
+        if args == ("rev-parse", "--show-toplevel"):
             return _completed(stdout=str(repo_root) + "\n")
-        if args == ["git", "-C", str(repo_root), "ls-files", "-z"]:
+        if args == ("ls-files", "-z"):
             return _completed(stdout="README.md\x00src/main.py\x00")
-        raise AssertionError(f"unexpected command: {args}")
+        raise AssertionError(f"unexpected command: {args} cwd={path}")
 
-    monkeypatch.setattr(graph_loader_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(git_repo_module.GitRepo, "run_git_at", staticmethod(fake_run_git_at))
     worker = ProjectLoaderWorker(ProjectLoadRequest(project_path=project_path))
     loaded = []
     errors = []
@@ -51,11 +51,10 @@ def test_project_loader_resolves_repo_root_and_builds_tree(monkeypatch, tmp_path
 def test_project_loader_fails_for_non_git_directory(monkeypatch, tmp_path: Path):
     project_path = tmp_path / "not-repo"
 
-    def fake_run(args, **kwargs):
-        assert args == ["git", "-C", str(project_path), "rev-parse", "--show-toplevel"]
+    def fake_run_git_at(path: Path, *args: str):
         return _completed(returncode=128, stderr="not a git repository")
 
-    monkeypatch.setattr(graph_loader_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(git_repo_module.GitRepo, "run_git_at", staticmethod(fake_run_git_at))
     worker = ProjectLoaderWorker(ProjectLoadRequest(project_path=project_path))
     loaded = []
     errors = []
@@ -72,14 +71,14 @@ def test_project_loader_fails_for_non_git_directory(monkeypatch, tmp_path: Path)
 def test_project_loader_fails_for_empty_tracked_file_list(monkeypatch, tmp_path: Path):
     repo_root = tmp_path / "repo"
 
-    def fake_run(args, **kwargs):
-        if args == ["git", "-C", str(repo_root), "rev-parse", "--show-toplevel"]:
+    def fake_run_git_at(path: Path, *args: str):
+        if args == ("rev-parse", "--show-toplevel"):
             return _completed(stdout=str(repo_root) + "\n")
-        if args == ["git", "-C", str(repo_root), "ls-files", "-z"]:
+        if args == ("ls-files", "-z"):
             return _completed(stdout="")
         raise AssertionError(f"unexpected command: {args}")
 
-    monkeypatch.setattr(graph_loader_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(git_repo_module.GitRepo, "run_git_at", staticmethod(fake_run_git_at))
     worker = ProjectLoaderWorker(ProjectLoadRequest(project_path=repo_root))
     loaded = []
     errors = []
@@ -96,14 +95,14 @@ def test_project_loader_fails_for_empty_tracked_file_list(monkeypatch, tmp_path:
 def test_project_loader_fails_when_ls_files_fails(monkeypatch, tmp_path: Path):
     repo_root = tmp_path / "repo"
 
-    def fake_run(args, **kwargs):
-        if args == ["git", "-C", str(repo_root), "rev-parse", "--show-toplevel"]:
+    def fake_run_git_at(path: Path, *args: str):
+        if args == ("rev-parse", "--show-toplevel"):
             return _completed(stdout=str(repo_root) + "\n")
-        if args == ["git", "-C", str(repo_root), "ls-files", "-z"]:
+        if args == ("ls-files", "-z"):
             return _completed(returncode=1, stderr="ls-files failed")
         raise AssertionError(f"unexpected command: {args}")
 
-    monkeypatch.setattr(graph_loader_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(git_repo_module.GitRepo, "run_git_at", staticmethod(fake_run_git_at))
     worker = ProjectLoaderWorker(ProjectLoadRequest(project_path=repo_root))
     loaded = []
     errors = []
