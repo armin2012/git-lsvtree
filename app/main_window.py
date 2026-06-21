@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QSplitter,
     QStackedWidget,
     QToolBar,
 )
@@ -29,15 +30,16 @@ from git_lsvtree_ui.core.diff_service import DiffResult
 from git_lsvtree_ui.core.graph_model import GraphModel
 from git_lsvtree_ui.core.project_tree import ProjectTree
 from git_lsvtree_ui.layout.tree_layout import LayoutGraph
+from git_lsvtree_ui.ui.collapsible_navigator import BTN_WIDTH as _NAV_BTN_WIDTH, CollapsibleNavigator
 from git_lsvtree_ui.ui.detail_panel import DetailPanel
 from git_lsvtree_ui.ui.diff_panel import DiffPanel
 from git_lsvtree_ui.ui.graph_view import GraphView
-from git_lsvtree_ui.ui.project_navigator import ProjectNavigator
 from git_lsvtree_ui.ui.status_bar import GitLsvtreeStatusBar
 
 
 logger = logging.getLogger(__name__)
 MAX_EXPORT_PIXELS = 12_000_000
+_DEFAULT_NAV_WIDTH = 200
 
 
 class MainWindow(QMainWindow):
@@ -57,6 +59,7 @@ class MainWindow(QMainWindow):
         self.current_graph: GraphModel | None = None
         self.current_project_root: Path | None = None
         self.current_project_tree: ProjectTree | None = None
+        self._nav_expanded_width: int = _DEFAULT_NAV_WIDTH
 
         self.graph_view = GraphView()
         self.graph_view.scene().nodeClickedWithModifiers.connect(self._on_node_clicked_with_modifiers)
@@ -68,7 +71,21 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.stack.addWidget(self.empty_label)
         self.stack.addWidget(self.graph_view)
-        self.setCentralWidget(self.stack)
+
+        self._collapsible_nav = CollapsibleNavigator()
+        self._collapsible_nav.fileSelected.connect(self.load_file)
+        self._collapsible_nav.collapseToggled.connect(self._on_nav_collapse_toggled)
+
+        self._nav_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._nav_splitter.addWidget(self._collapsible_nav)
+        self._nav_splitter.addWidget(self.stack)
+        self._nav_splitter.setCollapsible(0, False)
+        self._nav_splitter.setCollapsible(1, False)
+        self._nav_splitter.setStretchFactor(0, 0)
+        self._nav_splitter.setStretchFactor(1, 1)
+        self._nav_splitter.setSizes([_NAV_BTN_WIDTH, 1000])
+        self._nav_splitter.splitterMoved.connect(self._on_splitter_moved)
+        self.setCentralWidget(self._nav_splitter)
 
         self.detail_panel = DetailPanel()
         self.diff_panel = DiffPanel()
@@ -88,9 +105,12 @@ class MainWindow(QMainWindow):
         logger.debug("creating main window actions")
         self.open_action = self._make_action("Open File…", self.open_file_dialog, "Ctrl+O")
         self.open_project_action = self._make_action("Open Project…", self.open_project_dialog, "Ctrl+Shift+O")
-        self.toggle_navigator_action = self._make_action("Project Navigator", self._toggle_navigator_dock)
+        self.toggle_navigator_action = self._make_action("Project Navigator", self._collapsible_nav.toggle)
         self.toggle_navigator_action.setCheckable(True)
         self.toggle_navigator_action.setChecked(False)
+        self._collapsible_nav.collapseToggled.connect(
+            lambda collapsed: self.toggle_navigator_action.setChecked(not collapsed)
+        )
         self.reload_action = self._make_action("Reload", self.reload_current_file, "F5")
         self.full_action = self._make_action("Full", lambda: self.reload_current_file(mode="full"))
         self.key_action = self._make_action("Key", lambda: self.reload_current_file(mode="key"))
@@ -150,6 +170,7 @@ class MainWindow(QMainWindow):
         self.addToolBar(toolbar)
         for action in (
             self.open_action,
+            self.open_project_action,
             self.reload_action,
             self.full_action,
             self.key_action,
@@ -189,19 +210,6 @@ class MainWindow(QMainWindow):
         diff_dock.setWidget(self.diff_panel)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, diff_dock)
 
-        self.project_navigator = ProjectNavigator()
-        self.project_navigator.fileSelected.connect(self.load_file)
-        self.navigator_dock = QDockWidget("Project", self)
-        self.navigator_dock.setObjectName("navigatorDock")
-        self.navigator_dock.setFeatures(
-            QDockWidget.DockWidgetFeature.DockWidgetClosable
-            | QDockWidget.DockWidgetFeature.DockWidgetMovable
-            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
-        )
-        self.navigator_dock.setWidget(self.project_navigator)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.navigator_dock)
-        self.navigator_dock.hide()
-        self.navigator_dock.visibilityChanged.connect(self._on_navigator_visibility_changed)
         logger.debug("created dock widgets")
 
     # ── state setters ──────────────────────────────────────────────────────
@@ -283,21 +291,29 @@ class MainWindow(QMainWindow):
         )
         self.current_project_root = result.repo_root
         self.current_project_tree = result.tree
-        self.project_navigator.set_project_tree(result.tree)
-        self.navigator_dock.show()
-        self.toggle_navigator_action.setChecked(True)
+        self._collapsible_nav.set_project_tree(result.tree)
+        if self._collapsible_nav.is_collapsed:
+            self._collapsible_nav.expand()
 
     def _on_project_failed(self, message: str) -> None:
         logger.warning("project load failed message=%s", message)
 
-    def _toggle_navigator_dock(self) -> None:
-        if self.toggle_navigator_action.isChecked():
-            self.navigator_dock.show()
+    def _on_nav_collapse_toggled(self, collapsed: bool) -> None:
+        total = self._nav_splitter.width()
+        if collapsed:
+            w = self._nav_splitter.sizes()[0]
+            if w > _NAV_BTN_WIDTH:
+                self._nav_expanded_width = w
+            self._nav_splitter.setSizes([_NAV_BTN_WIDTH, total - _NAV_BTN_WIDTH])
         else:
-            self.navigator_dock.hide()
+            w = self._nav_expanded_width
+            self._nav_splitter.setSizes([w, max(0, total - w)])
 
-    def _on_navigator_visibility_changed(self, visible: bool) -> None:
-        self.toggle_navigator_action.setChecked(visible)
+    def _on_splitter_moved(self, _pos: int, _index: int) -> None:
+        if not self._collapsible_nav.is_collapsed:
+            w = self._nav_splitter.sizes()[0]
+            if w > _NAV_BTN_WIDTH:
+                self._nav_expanded_width = w
 
     def load_file(self, file_path: Path, mode: str = "key") -> None:
         logger.info("main window load file requested file=%s mode=%s", file_path, mode)

@@ -795,22 +795,48 @@ Phase 9 must ensure that separated curves have separate geometry so the clicked/
 
 ### 6.0 Main Window Layout
 
-MainWindow uses a central version-tree canvas plus dock widgets:
+MainWindow uses a horizontal QSplitter as the central widget, with the project navigator on the left and the version-tree stack on the right:
 
 ```
 QMainWindow
   ├── toolbar
-  ├── central widget: version-tree stack
-  │     ├── empty state
-  │     └── GraphView
-  ├── right dock: ProjectNavigatorDock
+  ├── central widget: QSplitter (horizontal)
+  │     ├── left: CollapsibleNavigator
+  │     │          ├── ProjectNavigator (QTreeWidget)
+  │     │          └── toggle button strip (18 px, right edge)
+  │     └── right: QStackedWidget
+  │                 ├── empty state label
+  │                 └── GraphView
   ├── right dock: Details
   └── bottom dock: DiffPanel
 ```
 
-`ProjectNavigatorDock` is dockable, closable, and floatable. It can be hidden to avoid long-term occupation of the version tree display area. The default placement is the right side because the version tree grows horizontally by branch columns, and the navigator should not consume the left-side origin used by branch headers and row labels.
+**Collapsed state** (default, no project open):
 
-The project navigator is opened only in project mode. In single-file mode it remains hidden unless a project has already been opened in the session.
+```
+┌──┬──────────────────────────────────────┬──────────┐
+│▶ │  version tree canvas / empty state   │  Detail  │
+└──┴──────────────────────────────────────┴──────────┘
+│                    Diff (bottom dock)               │
+└────────────────────────────────────────────────────┘
+```
+
+**Expanded state** (after project loaded):
+
+```
+┌─────────────┬────────────────────────────┬──────────┐
+│ ProjectNav  │  version tree canvas       │  Detail  │
+│ (≈200 px)  ◀│                            │          │
+└─────────────┴────────────────────────────┴──────────┘
+│                      Diff (bottom dock)             │
+└────────────────────────────────────────────────────┘
+```
+
+The ◀ toggle button on the right edge of the navigator collapses it to 18 px (showing only the ▶ strip). Clicking the strip or the button re-expands to the last-used width.
+
+The navigator is never fully hidden (removed from layout). It always occupies at least 18 px. This preserves the toggle affordance without requiring a menu action to re-show it.
+
+The project navigator is opened only in project mode. In single-file mode it remains collapsed unless a project has already been opened in the session.
 
 ### 6.1 GraphScene
 
@@ -870,40 +896,69 @@ For routed edges, `EdgeItem` consumes `LayoutEdge.route_kind` and `LayoutEdge.co
 
 `_pending_run` solves the expand-then-collapse UX issue: `expand_run()` sets `_pending_run = run_id` before triggering async reload; `set_loaded_layout()` restores `current_run` from it, so "Collapse Run" remains enabled immediately after expansion completes.
 
-### 6.5 ProjectNavigatorDock
+### 6.5 CollapsibleNavigator
 
-`ProjectNavigatorDock` is a `QDockWidget` containing a project tree widget. It is right-docked by default and can be:
+`CollapsibleNavigator(QWidget)` wraps `ProjectNavigator` inside a resizable left sidebar. It is the left child of the central `QSplitter`.
 
-- closed/hidden using the dock close button;
-- shown again from a View menu action;
-- floated as a separate window;
-- resized without forcing the version tree canvas to re-layout.
+```
+CollapsibleNavigator
+  QHBoxLayout (no margins, no spacing)
+    ├── ProjectNavigator   (hidden when collapsed, stretch=1)
+    └── _toggle_btn        (QPushButton, fixed 18 px width, always visible)
+```
 
-Visual behavior:
+**States:**
+
+| State | navigator | button text | button tooltip |
+|-------|-----------|-------------|----------------|
+| Collapsed | hidden | ▶ | Expand project navigator |
+| Expanded | visible | ◀ | Collapse project navigator |
+
+**Signal:** `collapseToggled(bool)` — emitted on every toggle; `True` = just collapsed, `False` = just expanded.
+
+**Public API:**
+
+```python
+expand()    # no-op if already expanded; shows navigator, updates button, emits signal
+collapse()  # no-op if already collapsed; hides navigator, updates button, emits signal
+toggle()    # calls expand() or collapse()
+is_collapsed: bool  # property
+set_project_tree(tree: ProjectTree)  # delegates to ProjectNavigator
+fileSelected: Signal(Path)  # forwarded from ProjectNavigator
+```
+
+**Width management (MainWindow):**
+
+`MainWindow` stores `_nav_expanded_width: int` (default 200 px).
+
+```python
+def _on_nav_collapse_toggled(self, collapsed: bool) -> None:
+    total = self._nav_splitter.width()
+    if collapsed:
+        # save current expanded width before shrinking
+        w = self._nav_splitter.sizes()[0]
+        if w > _NAV_BTN_WIDTH:
+            self._nav_expanded_width = w
+        self._nav_splitter.setSizes([_NAV_BTN_WIDTH, total - _NAV_BTN_WIDTH])
+    else:
+        w = self._nav_expanded_width
+        self._nav_splitter.setSizes([w, max(0, total - w)])
+```
+
+Dragging the splitter handle while expanded updates `_nav_expanded_width` via `splitterMoved`.
+
+**Toolbar:** `Open Project…` action is added to the toolbar (next to `Open File…`) so users can open a project without navigating the menu.
+
+**Visual behavior of ProjectNavigator (unchanged):**
 
 - directory collapsed: `+ dirname`
 - directory expanded: `- dirname`
 - file: `  filename`
 - current selected file: highlighted row
-- optional count badge: number of tracked files under a directory
 
-Interaction:
+Collapsing the navigator must not clear `current_project_tree` or `current_file`; expanding it again restores the same directory expanded/collapsed state.
 
-1. `Open Project...` opens a directory chooser.
-2. Project tree worker scans tracked files and populates first-level nodes.
-3. Clicking `+` expands that directory node in the navigator only.
-4. Clicking `-` collapses that directory node in the navigator only.
-5. Clicking a file triggers `MainWindow.load_file(file_path)` and updates the main version tree.
-6. Hiding the navigator must not clear `current_project_tree` or `current_file`; showing it again restores the same expanded/collapsed state.
-
-Navigator expansion is UI-only state:
-
-```python
-expanded_project_dirs: set[str]  # rel_path directory keys
-selected_project_file: str | None
-```
-
-The version tree canvas remains single-file. It is not used to render the directory tree.
+The version tree canvas remains single-file.
 
 ---
 

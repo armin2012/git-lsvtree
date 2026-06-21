@@ -57,16 +57,16 @@ def test_main_window_open_project_starts_project_loader(qapp, monkeypatch, tmp_p
     assert captured[0].project_path == tmp_path
 
 
-def test_main_window_project_loaded_shows_navigator(qapp, tmp_path):
+def test_main_window_project_loaded_expands_navigator(qapp, tmp_path):
     window = MainWindow()
-    assert window.navigator_dock.isHidden()
+    assert window._collapsible_nav.is_collapsed
 
     tree = _make_tree(tmp_path)
     window._on_project_loaded(ProjectLoadResult(repo_root=tmp_path, tree=tree))
 
-    assert not window.navigator_dock.isHidden()
+    assert not window._collapsible_nav.is_collapsed
     assert window.current_project_root == tmp_path
-    assert window.project_navigator.project_tree is tree
+    assert window._collapsible_nav.navigator.project_tree is tree
 
 
 def test_main_window_project_file_selection_starts_graph_loader(qapp, monkeypatch, tmp_path):
@@ -105,17 +105,19 @@ def test_main_window_project_load_failure_keeps_current_graph(qapp, tmp_path):
     assert window.current_layout is prev_layout
 
 
-def test_main_window_toggle_project_navigator_visibility_preserves_tree(qapp, tmp_path):
+def test_main_window_collapse_toggle_preserves_project_tree(qapp, tmp_path):
     window = MainWindow()
     tree = _make_tree(tmp_path)
     window._on_project_loaded(ProjectLoadResult(repo_root=tmp_path, tree=tree))
-    assert not window.navigator_dock.isHidden()
+    assert not window._collapsible_nav.is_collapsed
 
-    window.navigator_dock.hide()
-    assert window.navigator_dock.isHidden()
-    assert window.project_navigator.project_tree is tree
+    # collapse
+    window._collapsible_nav.collapse()
+    assert window._collapsible_nav.is_collapsed
+    assert window._collapsible_nav.navigator.project_tree is tree
 
-    window.navigator_dock.show()
-    assert not window.navigator_dock.isHidden()
-    assert window.project_navigator.project_tree is tree
-    assert window.project_navigator.tree_widget.topLevelItemCount() > 0
+    # re-expand
+    window._collapsible_nav.expand()
+    assert not window._collapsible_nav.is_collapsed
+    assert window._collapsible_nav.navigator.project_tree is tree
+    assert window._collapsible_nav.navigator.tree_widget.topLevelItemCount() > 0
