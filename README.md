@@ -14,13 +14,15 @@ Interactive single-file version tree browser for Git, inspired by ClearCase's `l
 
 ## Features
 
-- **Dynamic branch layout** — branches are placed next to their fork point (interval packing), so fork and merge lines stay short regardless of how many branches exist
+- **Dynamic branch layout** — branches are placed next to their fork point (interval packing), with merge-aware column ordering to reduce crossings without widening the graph unnecessarily
 - **Branch tree view** — ClearCase-style column layout; one column per concurrent branch, shared by non-overlapping branches
+- **Merge-aware edge routing** — overlapping merge edges are separated with curved routes, mirror-side routing reduces avoidable crossings, and edge paths avoid version-node circles where practical
+- **Clickable edge overlays** — click an edge to highlight it and show aligned endpoint metadata inside the version tree; the overlay is cached and refreshed in place for fast interaction
 - **Key / Full mode** — automatically samples key nodes (branch tips, merge points, tags) when history is large; switch to Full for all commits
 - **Collapse runs** — linear chains of intermediate commits are folded into a single dashed rectangle; double-click to expand
 - **Side-by-side diff** — click one node, Ctrl+click a second, then press Diff (Ctrl+D); the bottom panel shows old (red) and new (blue) content side-by-side with synchronized scrolling and an overview ruler
 - **Tag display** — version nodes that carry Git tags show the tag name in amber below the version number
-- **Detail panel** — click any node to see hash, author, date, subject, tags, and parent commits
+- **Detail panel** — click any node to see hash, branch, tags, author, committer, dates, subject, description, and parent commits
 - **Search** — type a hash prefix or label in the toolbar search box to highlight and scroll to a node
 - **Export PNG** — File → Export PNG to save the current graph as an image
 - **Level-of-detail** — labels are hidden automatically when zoom drops below 35%
@@ -44,7 +46,7 @@ git_lsvtree_ui/
 ├── layout/                 # Coordinate computation, no Qt dependency
 │   ├── geometry.py         # Point, Rect value types
 │   └── tree_layout.py      # Maps DisplayGraph → LayoutGraph (pixel coordinates)
-│                           # Branch interval packing: cols shared by non-overlapping branches
+│                           # Branch interval packing + merge-aware ordering + routed edges
 │
 ├── ui/                     # Qt widgets
 │   ├── items.py            # QGraphicsItem subclasses: VersionNodeItem, CollapsedRunItem, EdgeItem, BranchHeaderItem
@@ -59,7 +61,7 @@ git_lsvtree_ui/
 │   ├── main_window.py      # QMainWindow: wires all components, manages state
 │   └── __main__.py         # Entry point
 │
-├── tests/                  # Pytest regression suite (79 cases, no display required)
+├── tests/                  # Pytest regression suite (126 cases, no display required)
 └── doc/                    # Design document and screenshots
 ```
 
@@ -134,6 +136,18 @@ python -m git_lsvtree_ui path/to/some/tracked_file.py
 > Collapsed run rectangles (dashed border) cannot be diffed directly.  
 > Double-click a run to expand it, then select individual version nodes.
 
+### Inspecting edges
+
+Click any rendered edge to highlight that exact edge. The version tree shows a small endpoint overlay using aligned fields:
+
+```text
+edge endpoints
+from: <version> ｜ <short-hash> ｜ <branch>
+to:   <version> ｜ <short-hash> ｜ <branch>
+```
+
+Selecting another edge updates the same cached overlay in place, so stale endpoint information is not left on screen.
+
 ### Navigation
 
 - **Scroll wheel** — scroll the version tree up/down
@@ -150,7 +164,17 @@ pip install pytest
 pytest tests/ -v
 ```
 
-The test suite (79 cases) covers all core and layout layers without requiring a display.
+The test suite (126 cases) covers core, layout, and Qt scene behavior without requiring a visible display.
+
+---
+
+## Current release notes
+
+- Merge-aware branch column ordering and local swap refinement.
+- Routed merge edges with curve separation, adaptive stroke width, node-obstacle avoidance, and mirror-side crossing reduction.
+- Important Git tags are visible in normal UI loads.
+- Edge selection highlights one edge at a time and shows cached, aligned endpoint metadata.
+- Details panel now includes committer and commit description/body.
 
 ---
 

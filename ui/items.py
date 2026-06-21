@@ -6,7 +6,7 @@ import math
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QBrush, QColor, QPainterPath, QPainterPathStroker, QPen, QPolygonF
 from PySide6.QtWidgets import (
-    QGraphicsEllipseItem, QGraphicsPathItem, QGraphicsRectItem, QGraphicsSimpleTextItem,
+    QGraphicsEllipseItem, QGraphicsPathItem, QGraphicsPolygonItem, QGraphicsRectItem, QGraphicsSimpleTextItem,
 )
 
 from git_lsvtree_ui.layout.tree_layout import BranchHeader, LayoutEdge, LayoutNode
@@ -137,44 +137,34 @@ class EdgeItem(QGraphicsPathItem):
 
         if edge.kind == "merge":
             color = QColor("#dc2626")
-            line_width = 2.0
+            line_width = edge.stroke_width or 2.0
             dash = True
             self.setZValue(1.0)   # above nodes so merge lines are always visible
         elif edge.kind == "branch":
             color = QColor("#1d4ed8")
-            line_width = 1.8
+            line_width = edge.stroke_width or 1.8
             dash = False
             self.setZValue(-0.5)  # behind nodes
         else:
             color = QColor("#374151")
-            line_width = 1.8
+            line_width = edge.stroke_width or 1.8
             dash = False
             self.setZValue(-1.0)  # furthest behind
         self._base_z = self.zValue()
 
         sx, sy = edge.start.x, edge.start.y
         ex, ey = edge.end.x, edge.end.y
-        dx, dy = ex - sx, ey - sy
-        length = math.hypot(dx, dy)
-
         path = QPainterPath()
-        if length < 1.0:
+        arrow = self._build_arrow(edge, sx, sy, ex, ey)
+        if edge.route_kind == "quadratic" and edge.control_points:
+            control = edge.control_points[0]
+            bx, by = arrow[1]
             path.moveTo(sx, sy)
-            path.lineTo(ex, ey)
+            path.quadTo(control.x, control.y, bx, by)
         else:
-            ux, uy = dx / length, dy / length
-            bx = ex - self._ARROW_LEN * ux
-            by = ey - self._ARROW_LEN * uy
+            bx, by = arrow[1]
             path.moveTo(sx, sy)
             path.lineTo(bx, by)
-            px, py = -uy, ux
-            arrow = QPolygonF([
-                QPointF(ex, ey),
-                QPointF(bx + self._ARROW_W * px, by + self._ARROW_W * py),
-                QPointF(bx - self._ARROW_W * px, by - self._ARROW_W * py),
-            ])
-            path.addPolygon(arrow)
-            path.closeSubpath()
 
         self.setPath(path)
         pen = QPen(color, line_width)
@@ -185,21 +175,60 @@ class EdgeItem(QGraphicsPathItem):
         self._base_brush = QBrush(color)
         self._selected_brush = QBrush(QColor("#f59e0b"))
         self.setPen(pen)
-        self.setBrush(self._base_brush)
+        self.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+        self.arrow_item = QGraphicsPolygonItem(arrow[0], self)
+        self.arrow_item.setData(0, "edge")
+        self.arrow_item.setData(1, edge.src)
+        self.arrow_item.setData(2, edge.dst)
+        self.arrow_item.setData(3, edge.kind)
+        self.arrow_item.setPen(QPen(color, 0.8))
+        self.arrow_item.setBrush(self._base_brush)
 
     def set_selected_state(self, on: bool) -> None:
         logger.debug("set edge selected edge=%s selected=%s", self.edge_id, on)
         self._selected_state = on
         if on:
             self.setPen(self._selected_pen)
-            self.setBrush(self._selected_brush)
+            self.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+            self.arrow_item.setPen(QPen(QColor("#f59e0b"), 0.8))
+            self.arrow_item.setBrush(self._selected_brush)
             self.setZValue(max(self.zValue(), 2.0))
         else:
             self.setPen(self._base_pen)
-            self.setBrush(self._base_brush)
+            self.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+            base_color = self._base_brush.color()
+            self.arrow_item.setPen(QPen(base_color, 0.8))
+            self.arrow_item.setBrush(self._base_brush)
             self.setZValue(self._base_z)
 
     def shape(self):  # noqa: D102
         stroker = QPainterPathStroker()
         stroker.setWidth(max(10.0, self.pen().widthF() + 6.0))
         return stroker.createStroke(self.path()).united(self.path())
+
+    def _build_arrow(
+        self,
+        edge: LayoutEdge,
+        sx: float,
+        sy: float,
+        ex: float,
+        ey: float,
+    ) -> tuple[QPolygonF, tuple[float, float]]:
+        if edge.route_kind == "quadratic" and edge.control_points:
+            control = edge.control_points[0]
+            dx, dy = ex - control.x, ey - control.y
+        else:
+            dx, dy = ex - sx, ey - sy
+        length = math.hypot(dx, dy)
+        if length < 1.0:
+            return QPolygonF([QPointF(ex, ey), QPointF(ex, ey), QPointF(ex, ey)]), (ex, ey)
+        ux, uy = dx / length, dy / length
+        bx = ex - self._ARROW_LEN * ux
+        by = ey - self._ARROW_LEN * uy
+        px, py = -uy, ux
+        arrow = QPolygonF([
+            QPointF(ex, ey),
+            QPointF(bx + self._ARROW_W * px, by + self._ARROW_W * py),
+            QPointF(bx - self._ARROW_W * px, by - self._ARROW_W * py),
+        ])
+        return arrow, (bx, by)

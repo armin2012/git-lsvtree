@@ -24,12 +24,16 @@ def _log_entry(
     atime: int = 1000,
     ctime: int = 1000,
     subject: str = "msg",
+    committer: str = "Committer",
+    committer_email: str = "c@b.com",
+    description: str = "",
 ) -> str:
     parent_str = " ".join(parents)
     return (
         f"{US}{hash_} {parent_str}"
         f"{GS}{decorations}{GS}{author}{GS}{email}"
         f"{GS}{atime}{GS}{ctime}{GS}{subject}"
+        f"{GS}{committer}{GS}{committer_email}{GS}{description}"
     )
 
 
@@ -116,6 +120,28 @@ def test_load_single_commit():
     assert node.main_parent is None
     assert node.subject == "Initial"
     assert node.is_head_file_version is True
+
+
+def test_load_commit_description_and_committer():
+    h = "a" * 40
+    repo = _mock_repo(
+        _log_entry(
+            h,
+            subject="Fix routed edge detail",
+            committer="Release Bot",
+            committer_email="release@example.com",
+            description="Why:\nshow full metadata in Details",
+        ),
+        head_commit=h,
+    )
+
+    graph = HistoryLoader(repo).load()
+    node = graph.nodes[h]
+
+    assert node.subject == "Fix routed edge detail"
+    assert node.committer_name == "Release Bot"
+    assert node.committer_email == "release@example.com"
+    assert node.description == "Why:\nshow full metadata in Details"
 
 
 def test_load_linear_two_commits():

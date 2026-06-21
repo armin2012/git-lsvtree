@@ -1,8 +1,8 @@
 # git-lsvtree-ui Design Document
 
-**Version:** 1.4  
-**Date:** 2026-06-20  
-**Status:** Implemented (Phase 1–7 complete; v1.4 fixes important tag visibility and adds edge selection)
+**Version:** 1.5  
+**Date:** 2026-06-21  
+**Status:** Implemented through Phase 9 edge routing refinement
 
 ---
 
@@ -15,7 +15,7 @@ The static SVG approach is suitable for archiving and overall layout inspection,
 ### Core goals
 
 1. Display a single file's Git version tree in a GUI window with a toolbar.
-2. Click any version node to view its details: hash, branch, tags, author, date, subject, parents.
+2. Click any version node to view its details: hash, branch, tags, author, committer, dates, subject, description, parents.
 3. Select any two version nodes and run a diff between them.
 4. Expand and re-collapse linear-chain collapsed "run" nodes.
 5. Zoom and pan the canvas freely.
@@ -23,6 +23,7 @@ The static SVG approach is suitable for archiving and overall layout inspection,
 7. Visual style aligned with ClearCase Version Tree Browser: branch column headers (blue rectangles), version nodes (blue circles), main edges (dark lines), merge edges (red dashed lines).
 8. Status bar showing file, mode, version count, branch count, zoom, warnings.
 9. Click any rendered edge to highlight that edge and show both endpoint versions inside the version tree area; selecting another edge replaces the previous edge info.
+10. Route overlapping merge edges as separated curves where needed, and avoid drawing edges through unrelated version-node circles whenever practical.
 
 ### Out of scope (v1)
 
@@ -547,6 +548,198 @@ Changes confined to `layout/tree_layout.py` and its tests:
 | `branch_header_width` | 90 px | Branch header rectangle width |
 | `branch_header_height` | 18 px | Branch header rectangle height |
 
+### 5.6 Edge routing refinement (v1.5)
+
+The Phase 7 layout optimizes branch columns, merge crossing count, merge span, and width. It does **not** yet solve the final rendering problem where multiple edges may share the same visual path or pass through unrelated version-node circles.
+
+Phase 9 adds a routing layer after node coordinates are known and before `EdgeItem` renders the path.
+
+#### 5.6.1 Problem
+
+Current `LayoutEdge` has only:
+
+```python
+src: str
+dst: str
+kind: str
+label: str
+start: Point
+end: Point
+```
+
+This means every edge is rendered as a single direct path from `start` to `end`. In dense merge histories:
+
+- multiple merge edges can overlap exactly or nearly exactly;
+- click hit-testing on overlapped edges is ambiguous;
+- a merge edge can visually pass through intermediate version-node circles;
+- the selected edge endpoint overlay is correct, but the user may not be able to visually identify which overlapped edge was selected.
+
+#### 5.6.2 Design goal
+
+Route edges with minimal visual disruption:
+
+1. Preserve the existing Sugiyama-style branch column layout.
+2. Do not widen the branch layout to solve rendering-only overlap.
+3. Separate visually overlapped merge edges using stable Bezier curve offsets.
+4. Avoid unrelated node circles where practical.
+5. Preserve edge hit-testing and edge selection behavior.
+6. Keep main/branch edges simple unless they demonstrably overlap or pass through nodes.
+
+#### 5.6.3 Data model extension
+
+Extend `LayoutEdge` with optional route data:
+
+```python
+route_kind: Literal["line", "quadratic", "cubic"] = "line"
+control_points: tuple[Point, ...] = ()
+route_index: int = 0
+route_group_size: int = 1
+```
+
+Rules:
+
+- `route_kind == "line"` uses the current direct line path.
+- `route_kind == "quadratic"` uses one control point.
+- `route_kind == "cubic"` is reserved for future routing and uses two control points.
+- `route_index` and `route_group_size` are diagnostic fields that explain bundled/separated edge routing.
+
+#### 5.6.4 Route grouping
+
+Build route groups after all node centers are known:
+
+```python
+route_key = (
+    min(src_col, dst_col),
+    max(src_col, dst_col),
+    min(src_row, dst_row),
+    max(src_row, dst_row),
+    edge.kind,
+)
+```
+
+Edges in the same or near-identical route group are candidates for separation.
+
+For Phase 9, only exact route groups are mandatory. Near-overlap grouping is optional and can be added later using geometric similarity.
+
+#### 5.6.5 Curve offset
+
+For each route group with `k > 1`, assign deterministic offsets. Same-path merge groups must not leave any edge at zero offset, because avoiding overlap is more important than preserving the shortest straight path.
+
+```python
+offset_slot = index - (k - 1) / 2
+if offset_slot == 0:
+    offset_slot = 0.5
+
+spacing = min(
+    EDGE_MAX_PARALLEL_SPACING,
+    EDGE_BASE_PARALLEL_SPACING + k * EDGE_GROUP_SPACING_STEP,
+)
+offset_px = offset_slot * spacing
+```
+
+Implemented constants:
+
+```python
+EDGE_BASE_PARALLEL_SPACING = 12.0
+EDGE_GROUP_SPACING_STEP = 3.0
+EDGE_MAX_PARALLEL_SPACING = 30.0
+MIN_ROUTE_CONTROL_SEPARATION = 12.0
+EDGE_OBSTACLE_PADDING = 8.0
+MAX_ROUTE_OFFSET = 96.0
+MIN_EDGE_STROKE_WIDTH = 1.0
+```
+
+For a line from `start` to `end`, compute the unit perpendicular vector `(px, py)`. The quadratic control point is:
+
+```python
+mid = (start + end) / 2
+control = mid + perpendicular * offset_px
+```
+
+Visual stroke width is adaptive:
+
+```python
+base = 2.0 if kind == "merge" else 1.8
+stroke_width = base if k <= 2 else max(MIN_EDGE_STROKE_WIDTH, base - 0.18 * (k - 2))
+```
+
+The selection/highlight stroke can still be wider than the normal stroke. The hit-test shape remains wider than the visual stroke so thin routed edges remain clickable.
+
+If the direct line intersects an unrelated node circle, choose a deterministic side and apply at least `EDGE_BASE_PARALLEL_SPACING`.
+
+#### 5.6.6 Mirror-side selection
+
+After the initial offset magnitude is known, the router must evaluate the preferred side and its symmetric mirror side:
+
+```python
+preferred_offset = offset_px
+mirrored_offset = -offset_px
+```
+
+Each candidate is approximated as a sampled quadratic polyline and scored against already routed edges:
+
+```python
+score =
+    route_intersection_count * ROUTE_INTERSECTION_WEIGHT
+    + node_obstacle_hit_count * ROUTE_OBSTACLE_WEIGHT
+    + polyline_length * ROUTE_LENGTH_WEIGHT
+```
+
+Implemented constants:
+
+```python
+ROUTE_INTERSECTION_WEIGHT = 1000.0
+ROUTE_OBSTACLE_WEIGHT = 10000.0
+ROUTE_LENGTH_WEIGHT = 0.001
+ROUTE_SAMPLE_STEPS = 10
+```
+
+If the mirror side has a strictly lower score, use the mirror offset. This rule lets an edge draw from the opposite side when doing so reduces visible crossings. Node obstacle hits are weighted higher than edge crossings, so the router should not avoid one line crossing by routing through a version-node circle.
+
+This remains a bounded local heuristic. It does not solve global spline routing, but it improves the common case where the visually cleaner side is the exact mirror of the current curve.
+
+#### 5.6.7 Node obstacle avoidance
+
+For each edge, check every non-endpoint version node:
+
+1. Compute distance from node center to the direct segment `start → end`.
+2. If `distance < node_radius + EDGE_OBSTACLE_PADDING`, the edge is considered to pass through or too close to that node.
+3. Increase the curve offset away from the obstacle side.
+4. Clamp absolute offset to `MAX_ROUTE_OFFSET`.
+
+This is a local obstacle-avoidance heuristic, not a full global router. It is acceptable because the primary layout already keeps nodes in stable branch columns.
+
+#### 5.6.8 EdgeItem rendering
+
+`EdgeItem` should render based on `LayoutEdge.route_kind`:
+
+- `line`: current direct path and arrowhead.
+- `quadratic`: `QPainterPath.quadTo(control, end_without_arrow)` plus arrowhead at the tangent direction near destination.
+- `cubic`: future extension.
+
+The path item itself must use `NoBrush`; the arrowhead is a separate polygon child item. This prevents Qt from filling the area enclosed by a curved path and the arrowhead polygon.
+
+`EdgeItem.shape()` must continue to return a widened stroked path so separated curves remain easy to click.
+
+#### 5.6.9 Edge selection interaction
+
+Edge selection behavior remains:
+
+- click one edge → highlight that exact edge;
+- click another edge → previous highlight and endpoint overlay disappear;
+- overlay shows source/destination version label, short hash, and branch name using ` ｜ ` separators and monospace field alignment.
+- the scene owns a single cached edge endpoint overlay item; selecting another edge updates this cached overlay in place, invalidates the old/new overlay regions, and repaints the attached views so stale endpoint information cannot remain visible.
+
+Phase 9 must ensure that separated curves have separate geometry so the clicked/highlighted curve is visually identifiable.
+
+#### 5.6.10 Non-goals
+
+- No Graphviz/dot dependency.
+- No full spline router.
+- No orthogonal global edge router.
+- No branch column changes solely for edge rendering.
+- No guarantee that every possible edge avoids every node in pathological graphs.
+
 ---
 
 ## 6. UI Layer
@@ -559,7 +752,15 @@ Changes confined to `layout/tree_layout.py` and its tests:
 - **Edge hit-testing**: if a rendered `EdgeItem` is clicked, emits `edgeClicked(src_id, dst_id)` and updates scene-local edge selection state.
 - **Double-click**: `mouseDoubleClickEvent` emits `runDoubleClicked(run_id)` for collapsed run items.
 - **Selection**: `set_selection(node_ids)` applies yellow highlight (thick amber border) to selected version nodes.
-- **Edge selection**: `set_edge_selection(src_id, dst_id)` highlights exactly one edge and displays a small overlay in the version tree area with both endpoint labels, branches, short hashes, and tags. Selecting another edge removes the previous overlay and highlight.
+- **Edge selection**: `set_edge_selection(src_id, dst_id)` highlights exactly one edge and displays a small overlay in the version tree area with both endpoint labels, short hashes, and branch names. Selecting another edge removes the previous overlay and highlight. The endpoint rows must use a fixed-width visual format:
+
+  ```text
+  from: <version> ｜ <short-hash> ｜ <branch>
+  to:   <version> ｜ <short-hash> ｜ <branch>
+  ```
+
+  The overlay text must use a monospace font and padded fields so the `from` and `to` rows align vertically. The separator is ` ｜ ` to make field boundaries visually clear.
+- **Edge overlay refresh**: `GraphScene` must cache one endpoint overlay panel and update it in place when edge selection changes. `set_edge_selection()` must hide or replace the previous content before showing the new endpoint data, invalidate both the old and new overlay bounding regions, call scene update, and request viewport repaint on attached views. This keeps edge click feedback fast and prevents stale overlay pixels from staying on screen.
 - **Search highlight**: `highlight_node(node_id)` applies an amber fill and scrolls the view to the node.
 - **Level-of-detail**: `update_lod(zoom)` hides all node labels when `zoom < 0.35`, reducing visual clutter at low magnification.
 
@@ -576,9 +777,11 @@ Zoom is anchored under the mouse cursor (`AnchorUnderMouse`). After `fitInView()
 | `VersionNodeItem` | `QGraphicsEllipseItem` | Blue circle; yellow thick border when selected |
 | `CollapsedRunItem` | `QGraphicsRectItem` | Light grey rectangle, dashed border |
 | `BranchHeaderItem` | `QGraphicsRectItem` | Blue rectangle at column top |
-| `EdgeItem` | `QGraphicsPathItem` | Dark grey (main), blue (branch), red dashed (merge); bright selected pen when edge-selected |
+| `EdgeItem` | `QGraphicsPathItem` | Dark grey (main), blue (branch), red dashed (merge); line or routed Bezier curve; bright selected pen when edge-selected |
 
 All items store a `label_item: QGraphicsSimpleTextItem` child for LOD visibility toggling.
+
+For routed edges, `EdgeItem` consumes `LayoutEdge.route_kind` and `LayoutEdge.control_points`. Edge hit-testing is based on the rendered `QPainterPath.shape()`, not a separate straight-line proxy, so visual selection and click selection remain consistent.
 
 ### 6.4 MainWindow state
 
@@ -812,6 +1015,44 @@ Replace static column assignment with dynamic interval packing (see §5.3):
 ### Phase 8 — Tag visibility and edge selection polish
 - **Important tag visibility**: normal UI loads set `include_repo_tags=True`; core tests keep the default opt-in behavior.
 - **Edge selection**: `GraphScene` tracks a single selected edge; `EdgeItem` supports selected styling; the scene displays endpoint version information as an overlay inside the version tree canvas.
+
+### Phase 9 — Edge Routing Refinement
+
+Goal: make overlapping merge lines distinguishable and reduce edge paths that pass through unrelated version-node circles, without changing branch column layout.
+
+#### Phase 9.1 — Extend layout edge route model
+- Add `route_kind`, `control_points`, `route_index`, and `route_group_size` to `LayoutEdge`.
+- Default to current line behavior for backward compatibility.
+- Add layout tests proving existing straight-line cases remain unchanged.
+
+#### Phase 9.2 — Route grouping and parallel curve offsets
+- Group same-path edges after node coordinates are known.
+- Assign stable symmetric offsets for route groups with more than one edge.
+- Convert grouped merge edges to quadratic Bezier routes.
+- Add tests for two and three overlapping merge edges producing distinct control points.
+
+#### Phase 9.3 — Node obstacle avoidance
+- Implement segment-to-circle proximity detection for non-endpoint version nodes.
+- If direct path intersects or nearly touches a node circle, apply deterministic curve offset.
+- Clamp offset to `MAX_ROUTE_OFFSET`.
+- Add tests proving a merge edge passing through an intermediate node receives a curve route.
+
+#### Phase 9.4 — EdgeItem Bezier rendering and arrow tangent
+- Render `quadratic` routes with `QPainterPath.quadTo()`.
+- Compute arrowhead direction from the curve tangent near destination.
+- Keep `shape()` widened around the actual rendered path.
+- Add tests around path shape / route metadata where Qt graphics assertions are stable.
+
+#### Phase 9.5 — Interaction validation
+- Verify clicked edge and highlighted edge use the same routed path.
+- Verify selecting a different routed edge clears the previous overlay.
+- Verify endpoint overlay remains correct for routed merge edges.
+
+#### Phase 9.6 — Mirror-side crossing reduction
+- Score preferred and mirrored curve offsets before finalizing a routed edge.
+- Choose the mirror side when it reduces route intersections without hitting unrelated version nodes.
+- Keep the same offset magnitude so the branch layout width is unchanged.
+- Add tests for mirror-side crossing reduction and obstacle-preserving side selection.
 
 ---
 

@@ -50,7 +50,7 @@ class HistoryLoader:
 
     def load(self) -> GraphModel:
         all_args = ("--all",) if self.include_all else ()
-        fmt = "%x01%H %P%x02%D%x02%an%x02%ae%x02%at%x02%ct%x02%s"
+        fmt = "%x01%H %P%x02%D%x02%an%x02%ae%x02%at%x02%ct%x02%s%x02%cn%x02%ce%x02%b"
         logger.info(
             "loading file history rel_path=%s include_all=%s",
             self.repo.rel_path,
@@ -78,8 +78,19 @@ class HistoryLoader:
         subjects: dict[str, str] = {}
 
         for rank, record in enumerate(records):
-            fields = (record.split(GS) + ["", "", "", "", "", ""])[:7]
-            hash_and_parents, decorations, author_name, author_email, author_time, commit_time, subject = fields
+            fields = (record.split(GS) + ["", "", "", "", "", "", "", "", ""])[:10]
+            (
+                hash_and_parents,
+                decorations,
+                author_name,
+                author_email,
+                author_time,
+                commit_time,
+                subject,
+                committer_name,
+                committer_email,
+                description,
+            ) = fields
             tokens = hash_and_parents.split()
             commit = tokens[0]
             parents = tuple(tokens[1:])
@@ -98,6 +109,9 @@ class HistoryLoader:
                 commit_time=int(commit_time or 0),
                 subject=subject.strip(),
                 topo_rank=-1,
+                committer_name=committer_name.strip(),
+                committer_email=committer_email.strip(),
+                description=description.strip(),
             )
 
         node_set = set(order_newest)
@@ -129,6 +143,9 @@ class HistoryLoader:
                 subject=original.subject,
                 topo_rank=topo_rank[commit],
                 is_head_file_version=commit == head_file_version,
+                committer_name=original.committer_name,
+                committer_email=original.committer_email,
+                description=original.description,
             )
 
         for commit in order_newest:

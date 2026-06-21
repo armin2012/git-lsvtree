@@ -18,6 +18,17 @@ _CROSSING_WEIGHT = 200.0
 _COLUMN_PENALTY = 2.0
 _NEW_COLUMN_PENALTY = 25.0
 _EXTRA_DEPTH_PENALTY = 10.0
+_EDGE_BASE_PARALLEL_SPACING = 12.0
+_EDGE_GROUP_SPACING_STEP = 3.0
+_EDGE_MAX_PARALLEL_SPACING = 30.0
+_MIN_ROUTE_CONTROL_SEPARATION = 12.0
+_EDGE_OBSTACLE_PADDING = 8.0
+_MAX_ROUTE_OFFSET = 96.0
+_MIN_EDGE_STROKE_WIDTH = 1.0
+_ROUTE_INTERSECTION_WEIGHT = 1000.0
+_ROUTE_OBSTACLE_WEIGHT = 10000.0
+_ROUTE_LENGTH_WEIGHT = 0.001
+_ROUTE_SAMPLE_STEPS = 10
 
 
 @dataclass(frozen=True)
@@ -54,6 +65,12 @@ class LayoutEdge:
     label: str
     start: Point
     end: Point
+    route_kind: str = "line"
+    control_points: tuple[Point, ...] = ()
+    route_index: int = 0
+    route_group_size: int = 1
+    route_offset: float = 0.0
+    stroke_width: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -189,6 +206,7 @@ class TreeLayout:
                 )
             )
 
+        edges = self._route_edges(edges, nodes)
         bounds = self._bounds(nodes, headers)
         logger.info(
             "layout complete layout_nodes=%d layout_edges=%d branches=%d bounds=%s",
@@ -681,6 +699,322 @@ class TreeLayout:
         lo_a, hi_a = sorted((a0, a1))
         lo_b, hi_b = sorted((b0, b1))
         return (lo_a < lo_b < hi_a < hi_b) or (lo_b < lo_a < hi_b < hi_a)
+
+    # ── edge routing ───────────────────────────────────────────────────────
+
+    def _route_edges(
+        self,
+        edges: list[LayoutEdge],
+        nodes: Mapping[str, LayoutNode],
+    ) -> list[LayoutEdge]:
+        logger.debug("routing edges count=%d", len(edges))
+        groups: dict[tuple[str, str, str], list[LayoutEdge]] = {}
+        for edge in edges:
+            groups.setdefault(self._route_group_key(edge), []).append(edge)
+
+        routed: list[LayoutEdge] = []
+        for group_edges in groups.values():
+            group_size = len(group_edges)
+            spacing = self._route_parallel_spacing(group_size)
+            for index, edge in enumerate(group_edges):
+                offset = 0.0
+                if group_size > 1 and edge.kind == "merge":
+                    offset_slot = index - (group_size - 1) / 2
+                    if abs(offset_slot) < 0.01:
+                        offset_slot = 0.5
+                    offset = offset_slot * spacing
+                    canonical_src = min(edge.src, edge.dst)
+                    if edge.src != canonical_src:
+                        offset = -offset
+
+                obstacle_offset = self._obstacle_route_offset(edge, nodes)
+                if obstacle_offset:
+                    if offset:
+                        offset += obstacle_offset
+                    else:
+                        offset = obstacle_offset
+
+                offset = max(-_MAX_ROUTE_OFFSET, min(_MAX_ROUTE_OFFSET, offset))
+                if abs(offset) < 0.01:
+                    routed.append(self._with_route_metadata(edge, index, group_size))
+                    continue
+
+                offset = self._choose_mirrored_route_offset(edge, offset, routed, nodes)
+                routed.append(self._with_quadratic_route(edge, offset, index, group_size))
+
+        logger.debug("edge routing complete routed_count=%d", len(routed))
+        return routed
+
+    @staticmethod
+    def _route_group_key(edge: LayoutEdge) -> tuple[str, str, str]:
+        endpoints = tuple(sorted((edge.src, edge.dst)))
+        return (endpoints[0], endpoints[1], edge.kind)
+
+    def _with_quadratic_route(
+        self,
+        edge: LayoutEdge,
+        offset: float,
+        route_index: int,
+        route_group_size: int,
+    ) -> LayoutEdge:
+        control = self._quadratic_control_point(edge.start, edge.end, offset)
+        logger.debug(
+            "route edge as quadratic src=%s dst=%s kind=%s offset=%s control=%s",
+            edge.src,
+            edge.dst,
+            edge.kind,
+            offset,
+            control,
+        )
+        return LayoutEdge(
+            src=edge.src,
+            dst=edge.dst,
+            kind=edge.kind,
+            label=edge.label,
+            start=edge.start,
+            end=edge.end,
+            route_kind="quadratic",
+            control_points=(control,),
+            route_index=route_index,
+            route_group_size=route_group_size,
+            route_offset=offset,
+            stroke_width=self._edge_stroke_width(edge.kind, route_group_size),
+        )
+
+    def _with_route_metadata(
+        self,
+        edge: LayoutEdge,
+        route_index: int,
+        route_group_size: int,
+    ) -> LayoutEdge:
+        return LayoutEdge(
+            src=edge.src,
+            dst=edge.dst,
+            kind=edge.kind,
+            label=edge.label,
+            start=edge.start,
+            end=edge.end,
+            route_kind=edge.route_kind,
+            control_points=edge.control_points,
+            route_index=route_index,
+            route_group_size=route_group_size,
+            route_offset=edge.route_offset,
+            stroke_width=self._edge_stroke_width(edge.kind, route_group_size),
+        )
+
+    @staticmethod
+    def _route_parallel_spacing(group_size: int) -> float:
+        if group_size <= 1:
+            return 0.0
+        return min(_EDGE_MAX_PARALLEL_SPACING, _EDGE_BASE_PARALLEL_SPACING + group_size * _EDGE_GROUP_SPACING_STEP)
+
+    @staticmethod
+    def _edge_stroke_width(kind: str, route_group_size: int) -> float:
+        base = 2.0 if kind == "merge" else 1.8
+        if route_group_size <= 2:
+            return base
+        return max(_MIN_EDGE_STROKE_WIDTH, base - 0.18 * (route_group_size - 2))
+
+    @staticmethod
+    def _quadratic_control_point(start: Point, end: Point, offset: float) -> Point:
+        dx, dy = end.x - start.x, end.y - start.y
+        length = math.hypot(dx, dy)
+        if length < 1.0:
+            return Point((start.x + end.x) / 2, (start.y + end.y) / 2)
+        px, py = -dy / length, dx / length
+        return Point((start.x + end.x) / 2 + px * offset, (start.y + end.y) / 2 + py * offset)
+
+    def _choose_mirrored_route_offset(
+        self,
+        edge: LayoutEdge,
+        preferred_offset: float,
+        routed_edges: list[LayoutEdge],
+        nodes: Mapping[str, LayoutNode],
+    ) -> float:
+        """Choose the side of a symmetric curved route with fewer visual conflicts."""
+        if abs(preferred_offset) < 0.01:
+            return 0.0
+        mirrored_offset = -preferred_offset
+        preferred_score = self._route_candidate_score(edge, preferred_offset, routed_edges, nodes)
+        mirrored_score = self._route_candidate_score(edge, mirrored_offset, routed_edges, nodes)
+        if mirrored_score + 0.001 < preferred_score:
+            logger.debug(
+                "mirror route side selected src=%s dst=%s preferred_offset=%s preferred_score=%s "
+                "mirrored_offset=%s mirrored_score=%s",
+                edge.src,
+                edge.dst,
+                preferred_offset,
+                preferred_score,
+                mirrored_offset,
+                mirrored_score,
+            )
+            return mirrored_offset
+        logger.debug(
+            "preferred route side kept src=%s dst=%s preferred_offset=%s preferred_score=%s mirrored_score=%s",
+            edge.src,
+            edge.dst,
+            preferred_offset,
+            preferred_score,
+            mirrored_score,
+        )
+        return preferred_offset
+
+    def _route_candidate_score(
+        self,
+        edge: LayoutEdge,
+        offset: float,
+        routed_edges: list[LayoutEdge],
+        nodes: Mapping[str, LayoutNode],
+    ) -> float:
+        control = self._quadratic_control_point(edge.start, edge.end, offset)
+        candidate_points = self._quadratic_route_points(edge.start, control, edge.end)
+        intersections = 0
+        for routed in routed_edges:
+            if {edge.src, edge.dst} & {routed.src, routed.dst}:
+                continue
+            routed_points = self._edge_route_points(routed)
+            if self._polylines_intersect(candidate_points, routed_points):
+                intersections += 1
+        obstacle_hits = self._route_obstacle_hit_count(edge, candidate_points, nodes)
+        length = self._polyline_length(candidate_points)
+        score = (
+            intersections * _ROUTE_INTERSECTION_WEIGHT
+            + obstacle_hits * _ROUTE_OBSTACLE_WEIGHT
+            + length * _ROUTE_LENGTH_WEIGHT
+        )
+        logger.debug(
+            "route candidate score src=%s dst=%s offset=%s intersections=%d obstacle_hits=%d length=%s score=%s",
+            edge.src,
+            edge.dst,
+            offset,
+            intersections,
+            obstacle_hits,
+            length,
+            score,
+        )
+        return score
+
+    def _route_obstacle_hit_count(
+        self,
+        edge: LayoutEdge,
+        route_points: list[Point],
+        nodes: Mapping[str, LayoutNode],
+    ) -> int:
+        hits = 0
+        for node_id, node in nodes.items():
+            if node_id in (edge.src, edge.dst) or node.kind != "version":
+                continue
+            threshold = node.radius + _EDGE_OBSTACLE_PADDING
+            for start, end in zip(route_points, route_points[1:]):
+                if self._distance_point_to_segment(node.center, start, end) < threshold:
+                    hits += 1
+                    break
+        return hits
+
+    def _edge_route_points(self, edge: LayoutEdge) -> list[Point]:
+        if edge.route_kind == "quadratic" and edge.control_points:
+            return self._quadratic_route_points(edge.start, edge.control_points[0], edge.end)
+        return [edge.start, edge.end]
+
+    @staticmethod
+    def _quadratic_route_points(start: Point, control: Point, end: Point) -> list[Point]:
+        points: list[Point] = []
+        for step in range(_ROUTE_SAMPLE_STEPS + 1):
+            t = step / _ROUTE_SAMPLE_STEPS
+            inv = 1.0 - t
+            x = inv * inv * start.x + 2 * inv * t * control.x + t * t * end.x
+            y = inv * inv * start.y + 2 * inv * t * control.y + t * t * end.y
+            points.append(Point(x, y))
+        return points
+
+    @staticmethod
+    def _polyline_length(points: list[Point]) -> float:
+        return sum(
+            math.hypot(end.x - start.x, end.y - start.y)
+            for start, end in zip(points, points[1:])
+        )
+
+    def _polylines_intersect(self, left: list[Point], right: list[Point]) -> bool:
+        for left_start, left_end in zip(left, left[1:]):
+            for right_start, right_end in zip(right, right[1:]):
+                if self._segments_intersect(left_start, left_end, right_start, right_end):
+                    return True
+        return False
+
+    @staticmethod
+    def _segments_intersect(a: Point, b: Point, c: Point, d: Point) -> bool:
+        def orient(p: Point, q: Point, r: Point) -> float:
+            return (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x)
+
+        def on_segment(p: Point, q: Point, r: Point) -> bool:
+            return (
+                min(p.x, r.x) - 0.001 <= q.x <= max(p.x, r.x) + 0.001
+                and min(p.y, r.y) - 0.001 <= q.y <= max(p.y, r.y) + 0.001
+            )
+
+        o1 = orient(a, b, c)
+        o2 = orient(a, b, d)
+        o3 = orient(c, d, a)
+        o4 = orient(c, d, b)
+        if o1 * o2 < 0 and o3 * o4 < 0:
+            return True
+        if abs(o1) <= 0.001 and on_segment(a, c, b):
+            return True
+        if abs(o2) <= 0.001 and on_segment(a, d, b):
+            return True
+        if abs(o3) <= 0.001 and on_segment(c, a, d):
+            return True
+        if abs(o4) <= 0.001 and on_segment(c, b, d):
+            return True
+        return False
+
+    def _obstacle_route_offset(
+        self,
+        edge: LayoutEdge,
+        nodes: Mapping[str, LayoutNode],
+    ) -> float:
+        for node_id, node in nodes.items():
+            if node_id in (edge.src, edge.dst) or node.kind != "version":
+                continue
+            distance = self._distance_point_to_segment(node.center, edge.start, edge.end)
+            threshold = node.radius + _EDGE_OBSTACLE_PADDING
+            if distance >= threshold:
+                continue
+            sign = self._obstacle_offset_sign(edge.start, edge.end, node.center)
+            base = max(_EDGE_BASE_PARALLEL_SPACING, threshold - distance + _EDGE_BASE_PARALLEL_SPACING)
+            offset = sign * min(_MAX_ROUTE_OFFSET, base)
+            logger.debug(
+                "edge near node obstacle src=%s dst=%s node=%s distance=%s threshold=%s offset=%s",
+                edge.src,
+                edge.dst,
+                node_id,
+                distance,
+                threshold,
+                offset,
+            )
+            return offset
+        return 0.0
+
+    @staticmethod
+    def _obstacle_offset_sign(start: Point, end: Point, obstacle: Point) -> float:
+        dx, dy = end.x - start.x, end.y - start.y
+        ox, oy = obstacle.x - start.x, obstacle.y - start.y
+        cross = dx * oy - dy * ox
+        if abs(cross) < 0.01:
+            return 1.0
+        return -1.0 if cross > 0 else 1.0
+
+    @staticmethod
+    def _distance_point_to_segment(point: Point, start: Point, end: Point) -> float:
+        dx, dy = end.x - start.x, end.y - start.y
+        length_sq = dx * dx + dy * dy
+        if length_sq <= 0.0001:
+            return math.hypot(point.x - start.x, point.y - start.y)
+        t = ((point.x - start.x) * dx + (point.y - start.y) * dy) / length_sq
+        t = max(0.0, min(1.0, t))
+        proj_x = start.x + t * dx
+        proj_y = start.y + t * dy
+        return math.hypot(point.x - proj_x, point.y - proj_y)
 
     # ── row / bounds helpers ───────────────────────────────────────────────
 

@@ -4,14 +4,18 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QRectF
+from PySide6.QtCore import QRectF, Qt
 from PySide6.QtWidgets import QApplication
 
 from git_lsvtree_ui.app.graph_loader import GraphLoadRequest, GraphLoadResult, GraphLoaderWorker
 from git_lsvtree_ui.app import main_window as main_window_module
 from git_lsvtree_ui.app.main_window import MainWindow
-from git_lsvtree_ui.core.graph_model import DisplayEdge, DisplayGraph, DisplayNode, GraphModel
+from git_lsvtree_ui.core.graph_model import DisplayEdge, DisplayGraph, DisplayNode, GraphModel, VersionNode
+from git_lsvtree_ui.layout.geometry import Point
+from git_lsvtree_ui.layout.tree_layout import LayoutEdge, LayoutNode
 from git_lsvtree_ui.layout.tree_layout import TreeLayout
+from git_lsvtree_ui.ui.detail_panel import DetailPanel
+from git_lsvtree_ui.ui.items import EdgeItem
 
 
 @pytest.fixture(scope="session")
@@ -150,15 +154,63 @@ def test_graph_scene_edge_selection_replaces_previous_overlay(qapp):
     assert scene._selected_edge_id == f"{a}->{b}"
     assert scene.edge_by_id[f"{a}->{b}"]._selected_state is True
     assert first_info is not None
-    assert any("v1.0" in child.text() for child in first_info.childItems())
+    first_text_items = [child for child in first_info.childItems() if hasattr(child, "text")]
+    assert first_text_items
+    first_text = first_text_items[0].text()
+    assert "from: 1" in first_text
+    assert "to:   2" in first_text
+    assert f"1         ｜ {a[:12]} ｜ main" in first_text
+    assert f"2         ｜ {b[:12]} ｜ main" in first_text
+    assert first_text_items[0].font().fixedPitch() is True
 
     scene.set_edge_selection(b, c)
 
     assert scene._selected_edge_id == f"{b}->{c}"
     assert scene.edge_by_id[f"{a}->{b}"]._selected_state is False
     assert scene.edge_by_id[f"{b}->{c}"]._selected_state is True
-    assert first_info not in scene.items()
-    assert scene._edge_info_item is not None
+    assert scene._edge_info_item is first_info
+    assert scene._edge_info_item.isVisible() is True
+    second_text = first_text_items[0].text()
+    assert f"2         ｜ {b[:12]} ｜ main" in second_text
+    assert f"3         ｜ {c[:12]} ｜ main" in second_text
+    assert f"1         ｜ {a[:12]} ｜ main" not in second_text
+
+
+def test_graph_scene_edge_selection_refreshes_overlay_regions(qapp, monkeypatch):
+    a, b, c = "a" * 40, "b" * 40, "c" * 40
+    display = DisplayGraph(
+        nodes={
+            a: DisplayNode(a, "version", "main", 0, 0, "1", (a,)),
+            b: DisplayNode(b, "version", "main", 1, 1, "2", (b,)),
+            c: DisplayNode(c, "version", "main", 2, 2, "3", (c,)),
+        },
+        edges=(DisplayEdge(a, b, "main"), DisplayEdge(b, c, "main")),
+    )
+    layout = TreeLayout().layout(display, branch_order=("main",))
+    window = MainWindow()
+    scene = window.graph_view.scene()
+    scene.set_layout_graph(layout)
+    invalidated = []
+    updated = []
+    monkeypatch.setattr(scene, "invalidate", lambda rect, layers=None: invalidated.append((rect, layers)))
+    monkeypatch.setattr(scene, "update", lambda rect=None: updated.append(rect))
+
+    scene.set_edge_selection(a, b)
+    scene.set_edge_selection(b, c)
+
+    assert len(invalidated) >= 2
+    assert len(updated) >= 2
+    assert all(not rect.isNull() for rect, _layers in invalidated)
+    assert all(rect is None or not rect.isNull() for rect in updated)
+
+
+def test_graph_scene_format_node_summary_uses_aligned_separator(qapp):
+    a = "a" * 40
+    display_node = DisplayNode(a, "version", "feature-x", 0, 0, "12", (a,))
+
+    summary = MainWindow().graph_view.scene()._format_node_summary(display_node)
+
+    assert summary == f"12        ｜ {a[:12]} ｜ feature-x"
 
 
 def test_main_window_edge_click_clears_version_selection(qapp):
@@ -186,3 +238,97 @@ def test_main_window_edge_click_clears_version_selection(qapp):
 
     assert window.selected_versions == []
     assert window.diff_action.isEnabled() is False
+
+
+def test_edge_item_uses_quadratic_path_for_routed_edge(qapp):
+    edge = LayoutEdge(
+        src="a",
+        dst="b",
+        kind="merge",
+        label="",
+        start=Point(0, 0),
+        end=Point(100, 0),
+        route_kind="quadratic",
+        control_points=(Point(50, 40),),
+        stroke_width=1.2,
+    )
+
+    item = EdgeItem(edge)
+
+    assert not item.path().isEmpty()
+    assert item.path().elementCount() > 2
+    assert abs(item.pen().widthF() - 1.2) < 0.001
+    assert item.brush().style() == Qt.BrushStyle.NoBrush
+    assert item.arrow_item.brush().color().name() == "#dc2626"
+
+
+def test_edge_item_selection_preserves_routed_path(qapp):
+    edge = LayoutEdge(
+        src="a",
+        dst="b",
+        kind="merge",
+        label="",
+        start=Point(0, 0),
+        end=Point(100, 0),
+        route_kind="quadratic",
+        control_points=(Point(50, 40),),
+    )
+    item = EdgeItem(edge)
+    before = item.path()
+
+    item.set_selected_state(True)
+    assert item.brush().style() == Qt.BrushStyle.NoBrush
+    assert item.arrow_item.brush().color().name() == "#f59e0b"
+    item.set_selected_state(False)
+
+    assert item.path() == before
+    assert item.arrow_item.brush().color().name() == "#dc2626"
+
+
+def test_detail_panel_shows_commit_description_and_committer(qapp):
+    commit = "a" * 40
+    graph = GraphModel(
+        nodes={
+            commit: VersionNode(
+                hash=commit,
+                parents=(),
+                main_parent=None,
+                merge_parents=(),
+                tags=("v1.0",),
+                author_name="Alice",
+                author_email="alice@example.com",
+                author_time=1000,
+                commit_time=1100,
+                subject="Improve Details",
+                topo_rank=0,
+                reconstructed_branch="main",
+                committer_name="Bob",
+                committer_email="bob@example.com",
+                description="Why:\nshow commit body in the Details dock",
+            )
+        },
+        edges=(),
+        order_newest_first=(commit,),
+        order_oldest_first=(commit,),
+        branches={},
+    )
+    layout_node = LayoutNode(
+        id=commit,
+        kind="version",
+        branch="main",
+        topo_rank=0,
+        center=Point(0, 0),
+        radius=10,
+        label="1",
+        source_hashes=(commit,),
+        tags=("v1.0",),
+    )
+    panel = DetailPanel()
+
+    panel.show_version(layout_node, graph)
+
+    text = panel.toPlainText()
+    assert "Improve Details" in text
+    assert "Bob <bob@example.com>" in text
+    assert "Why:" in text
+    assert "show commit body in the Details dock" in text

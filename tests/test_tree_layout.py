@@ -6,7 +6,8 @@ import math
 import pytest
 
 from git_lsvtree_ui.core.collapse_model import CollapseModel
-from git_lsvtree_ui.layout.tree_layout import LayoutSettings, TreeLayout
+from git_lsvtree_ui.layout.geometry import Point
+from git_lsvtree_ui.layout.tree_layout import LayoutEdge, LayoutNode, LayoutSettings, TreeLayout
 
 from .conftest import h, linear_graph, make_display_graph, two_branch_graph
 
@@ -482,6 +483,176 @@ def test_layout_edge_endpoints_offset_by_radius():
         d_end = math.hypot(edge.end.x - dc.x, edge.end.y - dc.y)
         assert abs(d_start - r) < 0.5, f"start not at circle boundary: {d_start}"
         assert abs(d_end - r) < 0.5, f"end not at circle boundary: {d_end}"
+
+
+def test_layout_edges_default_to_line_route():
+    graph = linear_graph(3)
+    dg = CollapseModel(enabled=False).build(graph)
+    layout = _layout(dg, branch_order=("main",))
+
+    assert layout.edges
+    assert all(edge.route_kind == "line" for edge in layout.edges)
+    assert all(edge.control_points == () for edge in layout.edges)
+
+
+def test_parallel_merge_edges_get_distinct_quadratic_routes():
+    dg = make_display_graph(
+        [
+            ("a0", "A", 0, ()),
+            ("b0", "B", 1, ()),
+        ],
+        [
+            ("a0", "b0", "merge"),
+            ("b0", "a0", "merge"),
+        ],
+    )
+
+    layout = _layout(dg, branch_order=("A", "B"))
+    merge_edges = [edge for edge in layout.edges if edge.kind == "merge"]
+
+    assert len(merge_edges) == 2
+    assert all(edge.route_kind == "quadratic" for edge in merge_edges)
+    assert merge_edges[0].control_points != merge_edges[1].control_points
+    assert {edge.route_group_size for edge in merge_edges} == {2}
+    assert min(
+        math.hypot(
+            left.control_points[0].x - right.control_points[0].x,
+            left.control_points[0].y - right.control_points[0].y,
+        )
+        for index, left in enumerate(merge_edges)
+        for right in merge_edges[index + 1:]
+    ) >= 12.0
+
+
+def test_many_parallel_merge_edges_reduce_stroke_and_keep_control_separation():
+    dg = make_display_graph(
+        [
+            ("a0", "A", 0, ()),
+            ("b0", "B", 1, ()),
+        ],
+        [
+            ("a0", "b0", "merge"),
+            ("b0", "a0", "merge"),
+            ("a0", "b0", "merge"),
+            ("b0", "a0", "merge"),
+            ("a0", "b0", "merge"),
+        ],
+    )
+
+    layout = _layout(dg, branch_order=("A", "B"))
+    merge_edges = [edge for edge in layout.edges if edge.kind == "merge"]
+    control_points = [edge.control_points[0] for edge in merge_edges]
+
+    assert len(merge_edges) == 5
+    assert all(edge.route_kind == "quadratic" for edge in merge_edges)
+    assert all(edge.stroke_width < 2.0 for edge in merge_edges)
+    assert min(
+        math.hypot(left.x - right.x, left.y - right.y)
+        for index, left in enumerate(control_points)
+        for right in control_points[index + 1:]
+    ) >= 12.0
+
+
+def test_merge_edge_through_intermediate_node_gets_curve_route():
+    dg = make_display_graph(
+        [
+            ("a0", "main", 0, ()),
+            ("mid", "main", 1, ()),
+            ("a1", "main", 2, ()),
+        ],
+        [
+            ("a0", "a1", "merge"),
+        ],
+    )
+
+    layout = _layout(dg, branch_order=("main",))
+    edge = layout.edges[0]
+
+    assert edge.route_kind == "quadratic"
+    assert edge.control_points
+    assert edge.route_offset != 0
+
+
+def test_route_offset_mirrors_when_other_side_reduces_crossing():
+    layout = TreeLayout(S)
+    candidate = LayoutEdge(
+        src="a",
+        dst="b",
+        kind="merge",
+        label="",
+        start=Point(0, 0),
+        end=Point(100, 0),
+    )
+    routed = [
+        LayoutEdge(
+            src="c",
+            dst="d",
+            kind="merge",
+            label="",
+            start=Point(0, 20),
+            end=Point(100, 20),
+        )
+    ]
+
+    chosen = layout._choose_mirrored_route_offset(candidate, 60.0, routed, {})
+
+    assert chosen == -60.0
+    assert layout._route_candidate_score(candidate, chosen, routed, {}) < layout._route_candidate_score(
+        candidate,
+        60.0,
+        routed,
+        {},
+    )
+
+
+def test_route_offset_keeps_side_when_mirror_would_hit_node_obstacle():
+    layout = TreeLayout(S)
+    candidate = LayoutEdge(
+        src="a",
+        dst="b",
+        kind="merge",
+        label="",
+        start=Point(0, 0),
+        end=Point(100, 100),
+    )
+    mirror_control = layout._quadratic_control_point(candidate.start, candidate.end, -60.0)
+    nodes = {
+        "a": LayoutNode("a", "version", "main", 0, candidate.start, 10, "a", ("a",)),
+        "b": LayoutNode("b", "version", "main", 1, candidate.end, 10, "b", ("b",)),
+        "obstacle": LayoutNode("obstacle", "version", "main", 2, mirror_control, 10, "o", ("o",)),
+    }
+
+    chosen = layout._choose_mirrored_route_offset(candidate, 60.0, [], nodes)
+
+    assert chosen == 60.0
+
+
+def test_endpoint_nodes_are_not_treated_as_obstacles():
+    dg = make_display_graph(
+        [
+            ("a0", "main", 0, ()),
+            ("a1", "main", 1, ()),
+        ],
+        [
+            ("a0", "a1", "merge"),
+        ],
+    )
+
+    layout = _layout(dg, branch_order=("main",))
+    edge = layout.edges[0]
+
+    assert edge.route_kind == "line"
+    assert edge.stroke_width == 2.0
+
+
+def test_distance_point_to_segment():
+    distance = TreeLayout(S)._distance_point_to_segment(
+        point=Point(5, 3),
+        start=Point(0, 0),
+        end=Point(10, 0),
+    )
+
+    assert abs(distance - 3) < 0.001
 
 
 def test_layout_fork_edges_at_most_one_column_wide():

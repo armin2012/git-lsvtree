@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 
 from PySide6.QtCore import QRectF, Signal
-from PySide6.QtGui import QBrush, QColor, QPen, QTransform
+from PySide6.QtGui import QBrush, QColor, QFont, QPen, QTransform
 from PySide6.QtWidgets import QGraphicsRectItem, QGraphicsScene, QGraphicsSimpleTextItem
 
 from git_lsvtree_ui.layout.tree_layout import LayoutGraph
@@ -31,6 +31,7 @@ class GraphScene(QGraphicsScene):
         self._selected_ids: list[str] = []
         self._selected_edge_id: str | None = None
         self._edge_info_item: QGraphicsRectItem | None = None
+        self._edge_info_text_item: QGraphicsSimpleTextItem | None = None
 
     def mousePressEvent(self, event):  # noqa: N802
         item = self.itemAt(event.scenePos(), self.views()[0].transform() if self.views() else QTransform())
@@ -79,6 +80,7 @@ class GraphScene(QGraphicsScene):
         self._selected_ids = []
         self._selected_edge_id = None
         self._edge_info_item = None
+        self._edge_info_text_item = None
 
         for header in layout.branch_headers.values():
             self.addItem(BranchHeaderItem(header))
@@ -120,28 +122,57 @@ class GraphScene(QGraphicsScene):
     def set_edge_selection(self, src_id: str, dst_id: str) -> None:
         edge_id = f"{src_id}->{dst_id}"
         logger.debug("set edge selection old=%s new=%s", self._selected_edge_id, edge_id)
-        self.clear_edge_selection()
+        old_rect = self._edge_info_scene_rect()
+        self._clear_selected_edge_highlight()
         item = self.edge_by_id.get(edge_id)
         if not item or not self._layout:
             logger.debug("edge selection skipped missing edge=%s", edge_id)
+            self._hide_edge_info_item(old_rect)
             return
         item.set_selected_state(True)
         self._selected_edge_id = edge_id
-        self._edge_info_item = self._make_edge_info_item(src_id, dst_id, item)
-        self.addItem(self._edge_info_item)
+        self._update_edge_info_item(src_id, dst_id, item)
+        self._refresh_region(old_rect, self._edge_info_scene_rect())
 
     def clear_edge_selection(self) -> None:
         logger.debug("clear edge selection current=%s", self._selected_edge_id)
+        old_rect = self._edge_info_scene_rect()
+        self._clear_selected_edge_highlight()
+        self._hide_edge_info_item(old_rect)
+
+    def _clear_selected_edge_highlight(self) -> None:
         if self._selected_edge_id and self._selected_edge_id in self.edge_by_id:
             self.edge_by_id[self._selected_edge_id].set_selected_state(False)
         self._selected_edge_id = None
-        if self._edge_info_item is not None:
-            self.removeItem(self._edge_info_item)
-            self._edge_info_item = None
 
-    def _make_edge_info_item(self, src_id: str, dst_id: str, edge_item: EdgeItem) -> QGraphicsRectItem:
+    def _hide_edge_info_item(self, old_rect: QRectF | None = None) -> None:
+        if self._edge_info_item is not None:
+            self._edge_info_item.hide()
+            self._refresh_region(old_rect or self._edge_info_scene_rect())
+
+    def _ensure_edge_info_item(self) -> QGraphicsRectItem:
+        if self._edge_info_item is not None and self._edge_info_text_item is not None:
+            return self._edge_info_item
+        panel = QGraphicsRectItem()
+        panel.setBrush(QBrush(QColor("#fffbeb")))
+        panel.setPen(QPen(QColor("#f59e0b"), 1.2))
+        panel.setZValue(10.0)
+        text_item = QGraphicsSimpleTextItem("", panel)
+        font = QFont("Menlo")
+        font.setStyleHint(QFont.StyleHint.Monospace)
+        font.setFixedPitch(True)
+        text_item.setFont(font)
+        text_item.setBrush(QBrush(QColor("#111827")))
+        panel.hide()
+        self.addItem(panel)
+        self._edge_info_item = panel
+        self._edge_info_text_item = text_item
+        logger.debug("created cached edge info overlay")
+        return panel
+
+    def _update_edge_info_item(self, src_id: str, dst_id: str, edge_item: EdgeItem) -> None:
         if not self._layout:
-            return QGraphicsRectItem()
+            return
         src = self._layout.nodes[src_id]
         dst = self._layout.nodes[dst_id]
         text = "\n".join((
@@ -149,24 +180,41 @@ class GraphScene(QGraphicsScene):
             f"from: {self._format_node_summary(src)}",
             f"to:   {self._format_node_summary(dst)}",
         ))
-        text_item = QGraphicsSimpleTextItem(text)
+        panel = self._ensure_edge_info_item()
+        text_item = self._edge_info_text_item
+        if text_item is None:
+            return
+        text_item.setText(text)
         bounds = text_item.boundingRect()
         pad = 6.0
-        panel = QGraphicsRectItem(QRectF(0, 0, bounds.width() + pad * 2, bounds.height() + pad * 2))
-        panel.setBrush(QBrush(QColor("#fffbeb")))
-        panel.setPen(QPen(QColor("#f59e0b"), 1.2))
-        panel.setZValue(10.0)
-        text_item.setParentItem(panel)
-        text_item.setBrush(QBrush(QColor("#111827")))
+        panel.setRect(QRectF(0, 0, bounds.width() + pad * 2, bounds.height() + pad * 2))
         text_item.setPos(pad, pad)
         anchor = edge_item.sceneBoundingRect().center()
         panel.setPos(anchor.x() + 10, anchor.y() + 10)
-        return panel
+        panel.show()
+        logger.debug("updated edge info overlay src=%s dst=%s pos=%s", src_id, dst_id, panel.pos())
+
+    def _edge_info_scene_rect(self) -> QRectF | None:
+        if self._edge_info_item is None or not self._edge_info_item.isVisible():
+            return None
+        return self._edge_info_item.sceneBoundingRect().adjusted(-2, -2, 2, 2)
+
+    def _refresh_region(self, *rects: QRectF | None) -> None:
+        refreshed = False
+        for rect in rects:
+            if rect is None or rect.isNull():
+                continue
+            self.invalidate(rect, QGraphicsScene.SceneLayer.AllLayers)
+            self.update(rect)
+            refreshed = True
+        if not refreshed:
+            self.update()
+        for view in self.views():
+            view.viewport().update()
 
     @staticmethod
     def _format_node_summary(node) -> str:
-        tags = f" tags={','.join(node.tags)}" if node.tags else ""
-        return f"{node.label} {node.id[:12]} branch={node.branch}{tags}"
+        return f"{node.label:<9} ｜ {node.id[:12]:<12} ｜ {node.branch}"
 
     def update_lod(self, zoom: float) -> None:
         show = zoom >= _LOD_LABEL_THRESHOLD

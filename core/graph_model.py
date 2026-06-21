@@ -31,6 +31,9 @@ class VersionNode:
     reconstructed_branch: str = ""
     per_branch_index: int = -1
     is_head_file_version: bool = False
+    committer_name: str = ""
+    committer_email: str = ""
+    description: str = ""
 
     @property
     def is_merge(self) -> bool:
