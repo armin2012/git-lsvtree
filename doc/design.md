@@ -873,6 +873,42 @@ The project navigator is opened only in project mode. In single-file mode it rem
 - **Search highlight**: `highlight_node(node_id)` applies an amber fill and scrolls the view to the node.
 - **Level-of-detail**: `update_lod(zoom)` hides all node labels when `zoom < 0.35`, reducing visual clutter at low magnification.
 
+### 6.1a Cross-platform CJK font strategy
+
+The UI must display mixed English and Chinese text correctly on macOS, Windows, Linux, and WSL. The application must not rely on a single hardcoded platform font such as `Menlo`, because missing CJK glyph coverage causes commit subjects, descriptions, branch names, and edge endpoint overlays to render as square boxes.
+
+Font selection is centralized in `ui/font_utils.py`:
+
+```python
+def choose_ui_font(point_size: int = 10) -> QFont: ...
+def choose_monospace_font(point_size: int = 10) -> QFont: ...
+def ui_font_family_stack() -> str: ...
+def monospace_font_family_stack() -> str: ...
+```
+
+Selection rules:
+
+1. Prefer fonts that can render the CJK probe text `中文测试【图像查看】患者模块` and ordinary ASCII text.
+2. For normal UI text, try platform CJK UI families before generic fallbacks:
+   - macOS: `PingFang SC`, `Heiti SC`, `Hiragino Sans GB`
+   - Windows: `Microsoft YaHei UI`, `Microsoft YaHei`, `SimSun`
+   - Linux/WSL: `Noto Sans CJK SC`, `WenQuanYi Micro Hei`
+   - final fallback: Qt application default font
+3. For aligned overlays and diff text, prefer CJK-capable monospace fonts:
+   - `Noto Sans Mono CJK SC`
+   - `Sarasa Mono SC`
+   - `Microsoft YaHei Mono`
+   - `Cascadia Mono`, `Consolas`, `Menlo`, `Monaco`
+   If no monospace candidate covers CJK text, fall back to the selected CJK UI font. Correct glyph display is more important than perfect monospace alignment.
+4. Log a warning once when no installed font can be proven to cover the CJK probe text. The UI should still render with Qt's default fallback chain.
+
+Usage requirements:
+
+- `GraphScene` edge endpoint overlay must use `choose_monospace_font()` instead of `QFont("Menlo")`.
+- `DetailPanel` HTML must use `ui_font_family_stack()` for body text and `monospace_font_family_stack()` for descriptions.
+- `DiffPanel` should use `choose_monospace_font()` instead of directly taking `QFontDatabase.systemFont(FixedFont)`.
+- Tests must verify the font utilities return a `QFont`, expose CSS-safe font family stacks, and do not hardcode `Menlo` as the first or only graph overlay font.
+
 ### 6.2 GraphView
 
 `GraphView` (subclass of `QGraphicsView`) uses `NoDrag` mode so that left-click events reach the scene for node selection. Panning is implemented with the **middle mouse button**: press to start, drag to pan, release to stop. This avoids the conflict between `ScrollHandDrag` mode and scene click events.

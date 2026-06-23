@@ -9,6 +9,8 @@ from PySide6.QtWidgets import QTextEdit
 from git_lsvtree_ui.core.graph_model import GraphModel, VersionNode
 from git_lsvtree_ui.layout.tree_layout import LayoutNode
 
+from .font_utils import monospace_font_family_stack, ui_font_family_stack
+
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +42,11 @@ class DetailPanel(QTextEdit):
         parent_text = ", ".join(parents) if parents else "none"
         description = vnode.description.strip() or "No description."
         logger.debug("detail panel show version id=%s", source[:12])
+        ui_fonts = ui_font_family_stack()
+        mono_fonts = monospace_font_family_stack()
         self.setHtml(
             f"""
-            <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            <div style="font-family: {ui_fonts};
                         color: #111827; font-size: 13px;">
               <h2 style="margin: 0 0 4px 0; font-size: 18px; font-weight: 700;">
                 {escape(vnode.subject or "(no subject)")}
@@ -67,7 +71,7 @@ class DetailPanel(QTextEdit):
 
               <div style="margin-top: 14px;">
                 <div style="font-weight: 700; color: #374151; margin-bottom: 6px;">Description</div>
-                <pre style="white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+                <pre style="white-space: pre-wrap; font-family: {mono_fonts};
                             background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px;
                             padding: 8px; margin: 0;">{escape(description)}</pre>
               </div>

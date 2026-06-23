@@ -3,11 +3,12 @@ from __future__ import annotations
 import logging
 
 from PySide6.QtCore import QRectF, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QPen, QTransform
+from PySide6.QtGui import QBrush, QColor, QPen, QTransform
 from PySide6.QtWidgets import QGraphicsRectItem, QGraphicsScene, QGraphicsSimpleTextItem
 
 from git_lsvtree_ui.layout.tree_layout import LayoutGraph
 
+from .font_utils import choose_monospace_font
 from .items import BranchHeaderItem, CollapsedRunItem, EdgeItem, VersionNodeItem
 
 
@@ -158,10 +159,7 @@ class GraphScene(QGraphicsScene):
         panel.setPen(QPen(QColor("#f59e0b"), 1.2))
         panel.setZValue(10.0)
         text_item = QGraphicsSimpleTextItem("", panel)
-        font = QFont("Menlo")
-        font.setStyleHint(QFont.StyleHint.Monospace)
-        font.setFixedPitch(True)
-        text_item.setFont(font)
+        text_item.setFont(choose_monospace_font())
         text_item.setBrush(QBrush(QColor("#111827")))
         panel.hide()
         self.addItem(panel)

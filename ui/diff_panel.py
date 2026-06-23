@@ -4,7 +4,7 @@ import difflib
 import logging
 
 from PySide6.QtCore import QObject, QRect, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFontDatabase, QPainter, QTextBlockFormat, QTextCursor
+from PySide6.QtGui import QColor, QPainter, QTextBlockFormat, QTextCursor
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -16,6 +16,8 @@ from PySide6.QtWidgets import (
 )
 
 from git_lsvtree_ui.core.diff_service import DiffResult
+
+from .font_utils import choose_monospace_font
 
 
 logger = logging.getLogger(__name__)
@@ -149,7 +151,7 @@ class DiffPanel(QWidget):
         super().__init__()
         logger.debug("init diff panel")
         self._syncing = False
-        font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+        font = choose_monospace_font()
 
         # ── header row (outside splitter so ruler height == pane height) ──
         self._old_label = QLabel("—")
